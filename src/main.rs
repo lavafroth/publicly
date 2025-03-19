@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 
+use authfile::Entity;
 use russh::keys::{PublicKey, ssh_key::public::KeyData, ssh_key::rand_core::OsRng};
 use russh::server::{self, Auth, Handle, Msg, Server as _, Session};
 use russh::{Channel, ChannelId, CryptoVec};
-use thiserror::Error;
 use tokio::sync::Mutex;
+mod authfile;
 
 #[tokio::main]
 async fn main() {
@@ -18,7 +18,7 @@ async fn main() {
     let mut methods = russh::MethodSet::empty();
     methods.push(russh::MethodKind::PublicKey);
 
-    let keychain = read_authfile(Path::new("./authfile")).await.unwrap();
+    let keychain = authfile::read(Path::new("./authfile")).await.unwrap();
     let key_data_pool = new_atomic(build_key_data_pool(&keychain));
     let key_data_to_id = new_atomic(HashMap::new());
     let id_to_user = new_atomic(HashMap::new());
@@ -50,115 +50,49 @@ async fn main() {
     sh.run_on_address(config, ("0.0.0.0", 2222)).await.unwrap();
 }
 
+fn build_key_data_pool(entities: &[Arc<Entity>]) -> HashSet<KeyData> {
+    entities.iter().map(|e| e.key_data()).collect()
+}
+
 // wraps a type T as Arc<Mutex<T>> so that it can be locked
 // in asynchronous coroutines
 fn new_atomic<T>(object: T) -> Atomic<T> {
     Arc::new(Mutex::new(object))
 }
 
-#[derive(Error, Debug)]
-pub enum AuthFileError {
-    #[error("unable to read authorization file")]
-    FileNotReadable(#[from] std::io::Error),
-    #[error("failed to parse public key")]
-    PublicKeyParsingError(#[from] russh::keys::ssh_key::Error),
-    #[error("invalid role specified in authorization file at line: {0}")]
-    InvalidRole(String),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Role {
-    Admin,
-    Normal,
-}
-
-#[derive(Clone)]
-pub struct AuthorizedEntity {
-    name: String,
-    role: Role,
-    key: PublicKey,
-}
-
-impl AuthorizedEntity {
-    fn set_role(&mut self, role: Role) {
-        self.role = role;
-    }
-
-    fn set_name(&mut self, name: &str) {
-        self.name = name.to_string();
-    }
-
-    fn to_pubkey(&self) -> PublicKey {
-        let mut original_key = self.key.clone();
-        let name = &self.name;
-        let role = if self.role == Role::Admin {
-            ":admin"
-        } else {
-            ""
-        };
-        original_key.set_comment(&format!("{name}{role}"));
-        original_key
-    }
-
-    fn key_data(&self) -> KeyData {
-        self.key.key_data().clone()
-    }
-}
-
-async fn read_authfile(path: &Path) -> Result<Vec<Arc<AuthorizedEntity>>, AuthFileError> {
-    let handle = std::fs::File::open(path)?;
-    let reader = BufReader::new(handle);
-    let mut keys = vec![];
-    for line in reader.lines() {
-        let line = line?;
-        let key = PublicKey::from_openssh(&line)?;
-
-        let comment = key.comment();
-        let (name, role) = match comment.rsplit_once(":") {
-            Some((name, "admin")) => (name, Role::Admin),
-            None => (comment, Role::Normal),
-            _ => {
-                return Err(AuthFileError::InvalidRole(comment.to_string()));
-            }
-        };
-
-        let authorized_entity = AuthorizedEntity {
-            name: name.to_string(),
-            role,
-            key,
-        };
-        keys.push(authorized_entity.into());
-    }
-    Ok(keys)
-}
-
-fn build_key_data_pool(entities: &[Arc<AuthorizedEntity>]) -> HashSet<KeyData> {
-    entities.iter().map(|e| e.key_data()).collect()
-}
-
 type Atomic<T> = Arc<Mutex<T>>;
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("failed to disconnect client with id {0}")]
+    ClientDisconnectFailed(usize),
+    #[error("russh error")]
+    Russh(#[from] russh::Error),
+    #[error("failed to read authorization file")]
+    Authfile(#[from] authfile::Error),
+}
 
 pub struct Client {
     channel: ChannelId,
     handle: Handle,
-    entity: Arc<AuthorizedEntity>,
+    // entity: Arc<Entity>,
 }
 
 #[derive(Clone)]
 struct Server {
-    keychain: Atomic<Vec<Arc<AuthorizedEntity>>>,
+    keychain: Atomic<Vec<Arc<Entity>>>,
     key_data_pool: Atomic<HashSet<KeyData>>,
-    key_data_to_user: Atomic<HashMap<KeyData, Arc<AuthorizedEntity>>>,
+    key_data_to_user: Atomic<HashMap<KeyData, Arc<Entity>>>,
     key_data_to_id: Atomic<HashMap<KeyData, Vec<usize>>>,
-    id_to_user: Atomic<HashMap<usize, Arc<AuthorizedEntity>>>,
+    id_to_user: Atomic<HashMap<usize, Arc<Entity>>>,
     clients: Atomic<HashMap<usize, Client>>,
 
     id: usize,
 }
 
 impl Server {
-    async fn reload(&mut self) {
-        let new_keychain = read_authfile(Path::new("./authfile")).await.unwrap();
+    async fn reload(&mut self) -> Result<(), Error> {
+        let new_keychain = authfile::read(Path::new("./authfile")).await?;
         let new_key_data_pool = build_key_data_pool(&new_keychain);
 
         // freeze all maps in the server state
@@ -179,8 +113,9 @@ impl Server {
                 // these IDs are now invalid
                 for id in ids.iter() {
                     let client = &clients[id];
-                    // TODO: handle this unwrap
-                    client.handle.close(client.channel).await.unwrap();
+                    if let Err(()) = client.handle.close(client.channel).await {
+                        return Err(Error::ClientDisconnectFailed(*id));
+                    }
                     clients.remove(id);
                     id_to_user.remove(id);
                 }
@@ -194,6 +129,7 @@ impl Server {
             *keychain = new_keychain;
             *key_data_pool = new_key_data_pool;
         }
+        Ok(())
     }
 
     async fn post(&mut self, data: CryptoVec) {
@@ -205,7 +141,7 @@ impl Server {
         }
     }
 
-    async fn entity(&mut self) -> Arc<AuthorizedEntity> {
+    async fn entity(&mut self) -> Arc<Entity> {
         self.id_to_user.lock().await[&self.id].clone()
     }
 
@@ -213,7 +149,8 @@ impl Server {
         let entity = self.entity().await;
         let data = CryptoVec::from(format!(
             "{} with {:?} privileges has joined the lounge\r\n",
-            entity.name, entity.role
+            entity.name(),
+            entity.role()
         ));
         self.post(data.clone()).await;
     }
@@ -232,7 +169,7 @@ impl server::Server for Server {
 }
 
 impl server::Handler for Server {
-    type Error = russh::Error;
+    type Error = Error;
 
     async fn channel_open_session(
         &mut self,
@@ -240,7 +177,7 @@ impl server::Handler for Server {
         session: &mut Session,
     ) -> Result<bool, Self::Error> {
         {
-            let entity = self.entity().await;
+            // let entity = self.entity().await;
             let channel = channel.id();
             let handle = session.handle();
 
@@ -250,7 +187,7 @@ impl server::Handler for Server {
                 Client {
                     channel,
                     handle,
-                    entity,
+                    // entity,
                 },
             );
         }
@@ -285,17 +222,17 @@ impl server::Handler for Server {
     ) -> Result<(), Self::Error> {
         // Sending Ctrl+C ends the session and disconnects the client
         if data == [3] {
-            return Err(russh::Error::Disconnect);
+            return Err(russh::Error::Disconnect.into());
         }
 
         // Press `r` to reload the authorization file
         if data == [114] {
-            self.reload().await;
+            self.reload().await?;
         }
 
         let data = CryptoVec::from(format!(
             "[{}]: {}\r\n",
-            self.entity().await.name,
+            self.entity().await.name(),
             String::from_utf8_lossy(data)
         ));
         self.post(data.clone()).await;
