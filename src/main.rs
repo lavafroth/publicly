@@ -1,21 +1,18 @@
 use std::collections::{HashMap, HashSet};
-use std::fmt::format;
 use std::path::Path;
 use std::sync::Arc;
 
 use authfile::Entity;
-// use crossterm::event::{Event, read};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::termion::event::Event;
+use ratatui::termion::event::{Event, Key};
 use ratatui::text::Text;
-use ratatui::widgets::{Block, Borders, Clear, List, Paragraph};
+use ratatui::widgets::{Block, Clear, List};
 use ratatui::{Terminal, TerminalOptions, Viewport};
-use russh::keys::ssh_key;
 use russh::keys::{PublicKey, ssh_key::public::KeyData, ssh_key::rand_core::OsRng};
-use russh::server::{self, Auth, Config, Handle, Handler, Msg, Server, Session};
-use russh::{Channel, ChannelId, CryptoVec, Pty};
+use russh::server::{Auth, Config, Handle, Handler, Msg, Server, Session};
+use russh::{Channel, ChannelId, Pty};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tui_textarea::TextArea;
@@ -38,7 +35,6 @@ type Atomic<T> = Arc<Mutex<T>>;
 #[derive(Default)]
 struct App {
     pub history: Vec<String>,
-    pub counter: usize,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -119,12 +115,10 @@ struct AppServer {
 
 impl AppServer {
     pub async fn run(&mut self) -> Result<(), anyhow::Error> {
-        let app = self.app.clone();
-        let clients = self.clients.clone();
         let mut methods = russh::MethodSet::empty();
         methods.push(russh::MethodKind::PublicKey);
 
-        let config = russh::server::Config {
+        let config = Config {
             inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
             auth_rejection_time: std::time::Duration::from_secs(3),
             auth_rejection_time_initial: Some(std::time::Duration::from_secs(0)),
@@ -137,6 +131,15 @@ impl AppServer {
         };
         self.run_on_address(Arc::new(config), ("0.0.0.0", 2222))
             .await?;
+        Ok(())
+    }
+
+    async fn check_role_and_reload(&mut self) -> Result<(), Error> {
+        if self.id_to_user.lock().await[&self.id].role() == authfile::Role::Admin {
+            self.reload().await?;
+        } else {
+            // write a helpful message to the bottom most statusline
+        }
         Ok(())
     }
 
@@ -178,16 +181,8 @@ impl AppServer {
             *keychain = new_keychain;
             *key_data_pool = new_key_data_pool;
         }
+        log::info!("authfile synchronized to memory");
         Ok(())
-    }
-
-    async fn post(&mut self, data: CryptoVec) {
-        let mut clients = self.clients.lock().await;
-        for (id, client) in clients.iter_mut() {
-            if *id != self.id {
-                let _ = client.handle.data(client.channel, data.clone()).await;
-            }
-        }
     }
 
     async fn entity(&mut self) -> Arc<Entity> {
@@ -196,12 +191,66 @@ impl AppServer {
 
     async fn announce(&mut self) {
         let entity = self.entity().await;
-        let data = CryptoVec::from(format!(
-            "{} with {:?} privileges has joined the lounge\r\n",
+        self.app.lock().await.history.push(format!(
+            "{} with {:?} privileges has joined",
             entity.name(),
             entity.role()
         ));
-        self.post(data.clone()).await;
+    }
+
+    async fn render(&mut self) {
+        let clients = self.clients.clone();
+        let history: Vec<String> = self
+            .app
+            .lock()
+            .await
+            .history
+            .iter()
+            .rev()
+            .take(20)
+            .rev()
+            .cloned()
+            .collect();
+        tokio::spawn(async move {
+            for (
+                _,
+                Client {
+                    terminal, textarea, ..
+                },
+            ) in clients.lock().await.iter_mut()
+            {
+                terminal
+                    .draw(|f| {
+                        // clear the screen
+                        let area = f.area();
+                        f.render_widget(Clear, area);
+
+                        // split vertically as 80-20
+                        let layout = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints(vec![Constraint::Fill(1), Constraint::Length(4)])
+                            .split(f.area());
+                        let style = Style::default().fg(Color::Green);
+
+                        let paragraphs: Vec<_> = history
+                            .iter()
+                            .map(|message| Text::styled(message.to_string(), style))
+                            .collect();
+
+                        let paragraphs =
+                            List::new(paragraphs).block(Block::bordered().title("chat"));
+
+                        // let block = Block::default()
+                        //     .title("chat")
+                        //     .borders(Borders::ALL);
+
+                        // f.render_widget(paragraph.block(block), area);
+                        f.render_widget(paragraphs, layout[0]);
+                        f.render_widget(&*textarea, layout[1]);
+                    })
+                    .unwrap();
+            }
+        });
     }
 }
 
@@ -276,9 +325,9 @@ impl Handler for AppServer {
 
     async fn data(
         &mut self,
-        channel: ChannelId,
+        _channel: ChannelId,
         data: &[u8],
-        session: &mut Session,
+        _session: &mut Session,
     ) -> Result<(), Self::Error> {
         // Sending Ctrl+C ends the session and disconnects the client
         if data == [3] {
@@ -287,17 +336,21 @@ impl Handler for AppServer {
 
         // Alt+Return
         if data == [27, 13] {
-            let text = self
-                .clients
-                .lock()
-                .await
-                .get_mut(&self.id)
-                .unwrap()
-                .textarea
-                .lines()
-                .to_vec()
-                .join("\n");
+            let text = {
+                let mut clients = self.clients.lock().await;
+                let current_client = clients.get_mut(&self.id).unwrap();
+                let text = current_client.textarea.lines().to_vec().join("\n");
 
+                // HACK: Clear the message on send.
+                // Select all, delete.
+                current_client.textarea.select_all();
+                current_client
+                    .textarea
+                    .input(ratatui::termion::event::Event::Key(
+                        ratatui::termion::event::Key::Delete,
+                    ));
+                text
+            };
             let name = self.entity().await.name().to_string();
             let message = format!("[{name}]: {text}");
             self.app.lock().await.history.push(message);
@@ -305,82 +358,27 @@ impl Handler for AppServer {
 
         if !data.is_empty() {
             let mut iterator = data.iter().skip(1).map(|d| Ok(*d));
-            let keycode = ratatui::termion::event::parse_event(data[0], &mut iterator).unwrap();
-            self.clients
-                .lock()
-                .await
-                .get_mut(&self.id)
-                .unwrap()
-                .textarea
-                .input(keycode);
-        }
-
-        // Press `r` to reload the authorization file
-        if data == [114] {
-            self.reload().await?;
-        }
-
-        let clients = self.clients.clone();
-        let history: Vec<String> = self
-            .app
-            .lock()
-            .await
-            .history
-            .iter()
-            .rev()
-            .take(20)
-            .cloned()
-            .collect();
-        tokio::spawn(async move {
-            for (
-                _,
-                Client {
-                    terminal, textarea, ..
-                },
-            ) in clients.lock().await.iter_mut()
-            {
-                terminal
-                    .draw(|f| {
-                        // clear the screen
-                        let area = f.area();
-                        f.render_widget(Clear, area);
-
-                        // split vertically as 80-20
-                        let layout = Layout::default()
-                            .direction(Direction::Vertical)
-                            .constraints(vec![
-                                Constraint::Percentage(80),
-                                Constraint::Percentage(20),
-                            ])
-                            .split(f.area());
-                        let style = Style::default().fg(Color::Green);
-
-                        let paragraphs: Vec<_> = history
-                            .iter()
-                            .map(|message| Text::styled(message.to_string(), style))
-                            .collect();
-
-                        let paragraphs =
-                            List::new(paragraphs).block(Block::bordered().title("chat"));
-
-                        // let block = Block::default()
-                        //     .title("chat")
-                        //     .borders(Borders::ALL);
-
-                        // f.render_widget(paragraph.block(block), area);
-                        f.render_widget(paragraphs, layout[0]);
-                        f.render_widget(&*textarea, layout[1]);
-                    })
-                    .unwrap();
+            match ratatui::termion::event::parse_event(data[0], &mut iterator) {
+                // Press `Ctrl-r` to reload the authorization file
+                Ok(Event::Key(Key::Ctrl('r'))) => {
+                    self.check_role_and_reload().await?;
+                }
+                Ok(keycode) => {
+                    self.clients
+                        .lock()
+                        .await
+                        .get_mut(&self.id)
+                        .unwrap()
+                        .textarea
+                        .input(keycode);
+                }
+                Err(e) => {
+                    log::warn!("failed to parse keyboard input data: {:?}: {e}", data);
+                }
             }
-        });
-        // let data = CryptoVec::from(format!(
-        //     "[{}]: {}\r\n",
-        //     self.entity().await.name(),
-        //     String::from_utf8_lossy(data)
-        // ));
-        // self.post(data.clone()).await;
-        // session.data(channel, data)?;
+        }
+
+        self.render().await;
         Ok(())
     }
 
@@ -402,11 +400,14 @@ impl Handler for AppServer {
             height: row_height as u16,
         };
 
-        let mut clients = self.clients.lock().await;
-        let client = clients.get_mut(&self.id).unwrap();
-        client.terminal.resize(rect).unwrap();
+        {
+            let mut clients = self.clients.lock().await;
+            let client = clients.get_mut(&self.id).unwrap();
+            client.terminal.resize(rect).unwrap();
 
-        session.channel_success(channel)?;
+            session.channel_success(channel)?;
+        }
+        self.render().await;
 
         Ok(())
     }
