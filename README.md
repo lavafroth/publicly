@@ -9,5 +9,5 @@ interface or by editing it externally.
 The `authfile` is the source of truth. Over multiple runs or reloads of the server, the state
 of who is authorized is reflected in the `authfile`.
 
-Ephemeral keys can be added via the chat interface but unless the changes are committed using the `/commit`
-command, the changes will NOT persist on the next run or when an admin performs a reload.
+Though keys can be added via the chat interface, unless they are committed using the `/commit`
+command, they will NOT persist on the subsequent runs or reload with `ctrl-r`.
