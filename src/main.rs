@@ -41,6 +41,8 @@ pub enum Error {
     Russh(#[from] russh::Error),
     #[error("failed to read authorization file")]
     Authfile(#[from] authfile::Error),
+    #[error("failed to resize frame as requested by client {id}")]
+    FrameResize { source: std::io::Error, id: usize },
 }
 
 pub struct Client {
@@ -48,7 +50,6 @@ pub struct Client {
     handle: Handle,
     terminal: SshTerminal,
     textarea: TextArea<'static>,
-    // entity: Arc<Entity>,
 }
 
 struct TerminalHandle {
@@ -334,7 +335,7 @@ impl Handler for AppServer {
             return Err(russh::Error::Disconnect.into());
         }
 
-        // Alt+Return
+        // Alt-Return
         if data == [27, 13] {
             let text = {
                 let mut clients = self.clients.lock().await;
@@ -382,6 +383,7 @@ impl Handler for AppServer {
         Ok(())
     }
 
+    /// The client requests a pseudo-terminal with the given specifications.
     async fn pty_request(
         &mut self,
         channel: ChannelId,
@@ -406,6 +408,40 @@ impl Handler for AppServer {
             client.terminal.resize(rect).unwrap();
 
             session.channel_success(channel)?;
+        }
+        self.render().await;
+
+        Ok(())
+    }
+
+    /// The client's pseudo-terminal window size has changed.
+    async fn window_change_request(
+        &mut self,
+        _: ChannelId,
+        col_width: u32,
+        row_height: u32,
+        _: u32,
+        _: u32,
+        _: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: col_width as u16,
+            height: row_height as u16,
+        };
+
+        {
+            let mut clients = self.clients.lock().await;
+            match clients.get_mut(&self.id).unwrap().terminal.resize(rect) {
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(Error::FrameResize {
+                        source: e,
+                        id: self.id,
+                    });
+                }
+            };
         }
         self.render().await;
 
