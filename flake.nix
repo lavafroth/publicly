@@ -1,5 +1,5 @@
 {
-  description = "devshell for github:lavafroth/sweet";
+  description = "devshell for github:lavafroth/publik";
 
   inputs.flake-utils.url = "github:numtide/flake-utils";
 
@@ -15,6 +15,16 @@
         pkgs = nixpkgs.legacyPackages.${system};
       in
       {
+        packages.default = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+          pname = "publik";
+          version = "0.1.0";
+
+          src = ./.;
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+          };
+        };
+
         devShells.default = pkgs.mkShell rec {
           packages = with pkgs; [
             stdenv.cc.cc.lib
