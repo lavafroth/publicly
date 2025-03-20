@@ -331,52 +331,62 @@ impl Handler for AppServer {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         // Sending Ctrl+C ends the session and disconnects the client
-        if data == [3] {
-            return Err(russh::Error::Disconnect.into());
-        }
 
-        // Alt-Return
-        if data == [27, 13] {
-            let text = {
-                let mut clients = self.clients.lock().await;
-                let current_client = clients.get_mut(&self.id).unwrap();
-                let text = current_client.textarea.lines().to_vec().join("\n");
+        match data {
+            [3] => return Err(russh::Error::Disconnect.into()),
+            [13] => {
+                let text = {
+                    let mut clients = self.clients.lock().await;
+                    let current_client = clients.get_mut(&self.id).unwrap();
+                    let text = current_client.textarea.lines().to_vec().join("\n");
 
-                // HACK: Clear the message on send.
-                // Select all, delete.
-                current_client.textarea.select_all();
-                current_client
-                    .textarea
-                    .input(ratatui::termion::event::Event::Key(
-                        ratatui::termion::event::Key::Delete,
-                    ));
-                text
-            };
-            let name = self.entity().await.name().to_string();
-            let message = format!("[{name}]: {text}");
-            self.app.lock().await.history.push(message);
-        }
-
-        if !data.is_empty() {
-            let mut iterator = data.iter().skip(1).map(|d| Ok(*d));
-            match ratatui::termion::event::parse_event(data[0], &mut iterator) {
-                // Press `Ctrl-r` to reload the authorization file
-                Ok(Event::Key(Key::Ctrl('r'))) => {
-                    self.check_role_and_reload().await?;
-                }
-                Ok(keycode) => {
-                    self.clients
-                        .lock()
-                        .await
-                        .get_mut(&self.id)
-                        .unwrap()
+                    // HACK: Clear the message on send.
+                    // Select all, delete.
+                    current_client.textarea.select_all();
+                    current_client
                         .textarea
-                        .input(keycode);
-                }
-                Err(e) => {
-                    log::warn!("failed to parse keyboard input data: {:?}: {e}", data);
+                        .input(ratatui::termion::event::Event::Key(
+                            ratatui::termion::event::Key::Delete,
+                        ));
+                    text
+                };
+                let name = self.entity().await.name().to_string();
+                let message = format!("[{name}]: {text}");
+                self.app.lock().await.history.push(message);
+            }
+            // Alt-Return for multiline
+            [27, 13] => {
+                self.clients
+                    .lock()
+                    .await
+                    .get_mut(&self.id)
+                    .unwrap()
+                    .textarea
+                    .input(Event::Key(Key::Char('\n')));
+            }
+
+            data if !data.is_empty() => {
+                let mut iterator = data.iter().skip(1).map(|d| Ok(*d));
+                match ratatui::termion::event::parse_event(data[0], &mut iterator) {
+                    // Press `Ctrl-r` to reload the authorization file
+                    Ok(Event::Key(Key::Ctrl('r'))) => {
+                        self.check_role_and_reload().await?;
+                    }
+                    Ok(keycode) => {
+                        self.clients
+                            .lock()
+                            .await
+                            .get_mut(&self.id)
+                            .unwrap()
+                            .textarea
+                            .input(keycode);
+                    }
+                    Err(e) => {
+                        log::warn!("failed to parse keyboard input data: {:?}: {e}", data);
+                    }
                 }
             }
+            _ => {}
         }
 
         self.render().await;
