@@ -3,7 +3,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use authfile::Entity;
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::TermionBackend;
+use ratatui::buffer::Cell;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::termion::event::{Event, Key};
@@ -19,7 +20,7 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tui_textarea::TextArea;
 mod authfile;
 
-type SshTerminal = Terminal<CrosstermBackend<TerminalHandle>>;
+type SshTerminal = Terminal<TermionBackend<TerminalHandle>>;
 
 // wraps a type T as Arc<Mutex<T>> so that it can be locked
 // in asynchronous coroutines
@@ -52,6 +53,7 @@ pub struct Client {
     handle: Handle,
     terminal: SshTerminal,
     textarea: TextArea<'static>,
+    buf: Vec<Cell>,
 }
 
 struct TerminalHandle {
@@ -201,14 +203,9 @@ impl AppServer {
         let clients = self.clients.clone();
         let history: Vec<String> = self.app.lock().await.history.to_vec();
         tokio::spawn(async move {
-            for (
-                _,
-                Client {
-                    terminal, textarea, ..
-                },
-            ) in clients.lock().await.iter_mut()
-            {
-                terminal
+            for (_, client) in clients.lock().await.iter_mut() {
+                client
+                    .terminal
                     .draw(|f| {
                         // clear the screen
                         let area = f.area();
@@ -227,7 +224,8 @@ impl AppServer {
 
                         let paragraphs = List::new(paragraphs);
                         f.render_widget(paragraphs, layout[0]);
-                        f.render_widget(&*textarea, layout[1]);
+                        f.render_widget(&client.textarea, layout[1]);
+                        client.buf = f.buffer_mut().content.clone();
                     })
                     .unwrap();
             }
@@ -238,33 +236,24 @@ impl AppServer {
     // a keystroke
     async fn render_textarea(&mut self) {
         let clients = self.clients.clone();
-        let history: Vec<String> = self.app.lock().await.history.to_vec();
         let id = self.id;
         tokio::spawn(async move {
             let mut clients = clients.lock().await;
             let Client {
-                terminal, textarea, ..
+                terminal,
+                textarea,
+                buf,
+                ..
             } = clients.get_mut(&id).unwrap();
 
             terminal
                 .draw(|f| {
-                    // clear the screen
-                    let area = f.area();
-                    f.render_widget(Clear, area);
-
                     let layout = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints(vec![Constraint::Fill(1), Constraint::Length(4)])
                         .split(f.area());
-                    let style = Style::default().fg(Color::Green);
-
-                    let paragraphs: Vec<_> = history
-                        .iter()
-                        .map(|message| Text::styled(message.to_string(), style))
-                        .collect();
-
-                    let paragraphs = List::new(paragraphs);
-                    f.render_widget(paragraphs, layout[0]);
+                    f.buffer_mut().content = buf.to_vec();
+                    f.render_widget(Clear, layout[1]);
                     f.render_widget(&*textarea, layout[1]);
                 })
                 .unwrap();
@@ -298,7 +287,7 @@ impl Handler for AppServer {
             let handle = session.handle();
             let terminal_handle = TerminalHandle::start(handle.clone(), channel.clone()).await;
 
-            let backend = CrosstermBackend::new(terminal_handle);
+            let backend = TermionBackend::new(terminal_handle);
 
             // the correct viewport area will be set when the client request a pty
             let options = TerminalOptions {
@@ -323,6 +312,7 @@ impl Handler for AppServer {
             clients.insert(
                 self.id,
                 Client {
+                    buf: vec![],
                     textarea,
                     channel,
                     handle,
@@ -382,6 +372,7 @@ impl Handler for AppServer {
                 let name = self.entity().await.name().to_string();
                 let message = format!("[{name}]: {text}");
                 self.app.lock().await.history.push(message);
+                self.render().await;
             }
             // Alt-Return for multiline
             [27, 13] => {
@@ -392,6 +383,7 @@ impl Handler for AppServer {
                     .unwrap()
                     .textarea
                     .input(Event::Key(Key::Char('\n')));
+                self.render_textarea().await;
             }
 
             data if !data.is_empty() => {
@@ -414,11 +406,11 @@ impl Handler for AppServer {
                         log::warn!("failed to parse keyboard input data: {:?}: {e}", data);
                     }
                 }
+                self.render_textarea().await;
             }
             _ => {}
         }
 
-        self.render_textarea().await;
         Ok(())
     }
 
@@ -502,7 +494,7 @@ impl Drop for AppServer {
 #[tokio::main]
 async fn main() {
     env_logger::builder()
-        .filter_level(log::LevelFilter::Debug)
+        .filter_level(log::LevelFilter::Warn)
         .init();
 
     let keychain = authfile::read(Path::new("./authfile")).await.unwrap();
