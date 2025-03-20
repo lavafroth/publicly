@@ -10,7 +10,8 @@ interface or by editing it externally.
 
 - [x] SSH authentication and authorization
 - [x] Ability for admins to reload Authfile with `Ctrl` `r`
-- [x] Emacs-like shortcuts for textarea and multiline support
+- [x] Emacs-like shortcuts for textarea
+- [x] multiline support with `Alt` `Return`
 - [ ] `/commit` command to commit in-memory changes to Authfile
 - [ ] `/rename` command
 - [ ] `#mention` tags
@@ -21,7 +22,7 @@ interface or by editing it externally.
 The `authfile` is the source of truth.
 
 Though keys can be added via the chat interface, unless they are committed using the `/commit`
-command, they will NOT persist on the subsequent runs or reload with `ctrl` `r`.
+command, they will NOT persist on the subsequent runs or reload.
 
 Consider the following keys added to `authfile`
 
