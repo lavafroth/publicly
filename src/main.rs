@@ -9,7 +9,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::termion::event::{Event, Key};
 use ratatui::text::Text;
-use ratatui::widgets::{Block, Clear, List};
+use ratatui::widgets::{Block, BorderType, Clear, List};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use ringbuffer::{AllocRingBuffer, RingBuffer};
 use russh::keys::{PublicKey, ssh_key::public::KeyData, ssh_key::rand_core::OsRng};
@@ -306,7 +306,11 @@ impl Handler for AppServer {
             };
 
             let mut textarea = TextArea::default();
-            textarea.set_block(Block::bordered().title(title));
+            textarea.set_block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .title(title),
+            );
 
             let mut clients = self.clients.lock().await;
             clients.insert(
