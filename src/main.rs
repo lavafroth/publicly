@@ -233,6 +233,43 @@ impl AppServer {
             }
         });
     }
+
+    // Render textarea only for the client who happens to send
+    // a keystroke
+    async fn render_textarea(&mut self) {
+        let clients = self.clients.clone();
+        let history: Vec<String> = self.app.lock().await.history.to_vec();
+        let id = self.id;
+        tokio::spawn(async move {
+            let mut clients = clients.lock().await;
+            let Client {
+                terminal, textarea, ..
+            } = clients.get_mut(&id).unwrap();
+
+            terminal
+                .draw(|f| {
+                    // clear the screen
+                    let area = f.area();
+                    f.render_widget(Clear, area);
+
+                    let layout = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints(vec![Constraint::Fill(1), Constraint::Length(4)])
+                        .split(f.area());
+                    let style = Style::default().fg(Color::Green);
+
+                    let paragraphs: Vec<_> = history
+                        .iter()
+                        .map(|message| Text::styled(message.to_string(), style))
+                        .collect();
+
+                    let paragraphs = List::new(paragraphs);
+                    f.render_widget(paragraphs, layout[0]);
+                    f.render_widget(&*textarea, layout[1]);
+                })
+                .unwrap();
+        });
+    }
 }
 
 impl Server for AppServer {
@@ -381,7 +418,7 @@ impl Handler for AppServer {
             _ => {}
         }
 
-        self.render().await;
+        self.render_textarea().await;
         Ok(())
     }
 
