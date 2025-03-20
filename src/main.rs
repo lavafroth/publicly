@@ -10,6 +10,7 @@ use ratatui::termion::event::{Event, Key};
 use ratatui::text::Text;
 use ratatui::widgets::{Block, Clear, List};
 use ratatui::{Terminal, TerminalOptions, Viewport};
+use ringbuffer::{AllocRingBuffer, RingBuffer};
 use russh::keys::{PublicKey, ssh_key::public::KeyData, ssh_key::rand_core::OsRng};
 use russh::server::{Auth, Config, Handle, Handler, Msg, Server, Session};
 use russh::{Channel, ChannelId, Pty};
@@ -28,9 +29,10 @@ fn new_atomic<T>(object: T) -> Atomic<T> {
 
 type Atomic<T> = Arc<Mutex<T>>;
 
-#[derive(Default)]
+/// App contains data strictly related to the chat.
+/// It is not responsible for authorization.
 struct App {
-    pub history: Vec<String>,
+    pub history: AllocRingBuffer<String>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -197,17 +199,7 @@ impl AppServer {
 
     async fn render(&mut self) {
         let clients = self.clients.clone();
-        let history: Vec<String> = self
-            .app
-            .lock()
-            .await
-            .history
-            .iter()
-            .rev()
-            .take(20)
-            .rev()
-            .cloned()
-            .collect();
+        let history: Vec<String> = self.app.lock().await.history.to_vec();
         tokio::spawn(async move {
             for (
                 _,
@@ -490,8 +482,14 @@ async fn main() {
     );
     let keychain = new_atomic(keychain.entities);
 
+    let app = App {
+        history: AllocRingBuffer::new(128),
+    };
+
+    let app = new_atomic(app);
+
     let mut sh = AppServer {
-        app: new_atomic(App::default()),
+        app,
         keychain,
         id_to_user,
         key_data_to_id,
