@@ -6,6 +6,19 @@ use thiserror::Error;
 
 use russh::keys::PublicKey;
 use russh::keys::ssh_key::public::KeyData;
+
+pub fn sanitize_name(s: &str) -> String {
+    let mut sanitized = String::with_capacity(s.len());
+    for c in s.chars() {
+        let ok = c.is_ascii_alphanumeric() || c == '@';
+        if !ok {
+            continue;
+        }
+        sanitized.push(c);
+    }
+    sanitized
+}
+
 pub async fn read(path: &Path) -> Result<AuthFile, Error> {
     let handle = std::fs::File::open(path)?;
     let reader = BufReader::new(handle);
@@ -24,7 +37,7 @@ pub async fn read(path: &Path) -> Result<AuthFile, Error> {
         };
 
         let authorized_entity = Entity {
-            name: name.to_string(),
+            name: sanitize_name(name),
             role,
             key,
         };
