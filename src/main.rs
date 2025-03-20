@@ -20,10 +20,6 @@ mod authfile;
 
 type SshTerminal = Terminal<CrosstermBackend<TerminalHandle>>;
 
-fn build_key_data_pool(entities: &[Arc<Entity>]) -> HashSet<KeyData> {
-    entities.iter().map(|e| e.key_data()).collect()
-}
-
 // wraps a type T as Arc<Mutex<T>> so that it can be locked
 // in asynchronous coroutines
 fn new_atomic<T>(object: T) -> Atomic<T> {
@@ -145,7 +141,6 @@ impl AppServer {
 
     async fn reload(&mut self) -> Result<(), Error> {
         let new_keychain = authfile::read(Path::new("./authfile")).await?;
-        let new_key_data_pool = build_key_data_pool(&new_keychain);
 
         // freeze all maps in the server state
         {
@@ -157,7 +152,7 @@ impl AppServer {
             let mut id_to_user = self.id_to_user.lock().await;
 
             // find all strays
-            for stray in key_data_pool.difference(&new_key_data_pool) {
+            for stray in key_data_pool.difference(&new_keychain.key_pool) {
                 let Some(ids) = key_data_to_id.get(stray) else {
                     continue;
                 };
@@ -175,11 +170,12 @@ impl AppServer {
             }
 
             *key_data_to_user = new_keychain
+                .entities
                 .iter()
                 .map(|e| (e.key_data(), e.clone()))
                 .collect();
-            *keychain = new_keychain;
-            *key_data_pool = new_key_data_pool;
+            *keychain = new_keychain.entities;
+            *key_data_pool = new_keychain.key_pool;
         }
         log::info!("authfile synchronized to memory");
         Ok(())
@@ -225,7 +221,6 @@ impl AppServer {
                         let area = f.area();
                         f.render_widget(Clear, area);
 
-                        // split vertically as 80-20
                         let layout = Layout::default()
                             .direction(Direction::Vertical)
                             .constraints(vec![Constraint::Fill(1), Constraint::Length(4)])
@@ -237,14 +232,7 @@ impl AppServer {
                             .map(|message| Text::styled(message.to_string(), style))
                             .collect();
 
-                        let paragraphs =
-                            List::new(paragraphs).block(Block::bordered().title("chat"));
-
-                        // let block = Block::default()
-                        //     .title("chat")
-                        //     .borders(Borders::ALL);
-
-                        // f.render_widget(paragraph.block(block), area);
+                        let paragraphs = List::new(paragraphs);
                         f.render_widget(paragraphs, layout[0]);
                         f.render_widget(&*textarea, layout[1]);
                     })
@@ -288,12 +276,24 @@ impl Handler for AppServer {
             };
 
             let terminal = Terminal::with_options(backend, options).unwrap();
+            let title = {
+                let entity = self.entity().await;
+                let role = if entity.role() == authfile::Role::Admin {
+                    "-[admin]"
+                } else {
+                    ""
+                };
+                format!("[{}]{}", entity.name(), role)
+            };
+
+            let mut textarea = TextArea::default();
+            textarea.set_block(Block::bordered().title(title));
 
             let mut clients = self.clients.lock().await;
             clients.insert(
                 self.id,
                 Client {
-                    textarea: TextArea::default(),
+                    textarea,
                     channel,
                     handle,
                     terminal,
@@ -431,12 +431,18 @@ async fn main() {
         .init();
 
     let keychain = authfile::read(Path::new("./authfile")).await.unwrap();
-    let key_data_pool = new_atomic(build_key_data_pool(&keychain));
+    let key_data_pool = new_atomic(keychain.key_pool);
     let key_data_to_id = new_atomic(HashMap::new());
     let id_to_user = new_atomic(HashMap::new());
     let clients = new_atomic(HashMap::new());
-    let key_data_to_user = new_atomic(keychain.iter().map(|e| (e.key_data(), e.clone())).collect());
-    let keychain = new_atomic(keychain);
+    let key_data_to_user = new_atomic(
+        keychain
+            .entities
+            .iter()
+            .map(|e| (e.key_data(), e.clone()))
+            .collect(),
+    );
+    let keychain = new_atomic(keychain.entities);
 
     let mut sh = AppServer {
         app: new_atomic(App::default()),
