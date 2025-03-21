@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use authfile::Entity;
 use ratatui::backend::TermionBackend;
-use ratatui::buffer::Cell;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::termion::event::{Event, Key};
@@ -15,7 +14,7 @@ use ringbuffer::{AllocRingBuffer, RingBuffer};
 use russh::keys::{PublicKey, ssh_key::public::KeyData, ssh_key::rand_core::OsRng};
 use russh::server::{Auth, Config, Handle, Handler, Msg, Server, Session};
 use russh::{Channel, ChannelId, Pty};
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tui_textarea::TextArea;
 mod authfile;
@@ -25,10 +24,10 @@ type SshTerminal = Terminal<TermionBackend<TerminalHandle>>;
 // wraps a type T as Arc<Mutex<T>> so that it can be locked
 // in asynchronous coroutines
 fn new_atomic<T>(object: T) -> Atomic<T> {
-    Arc::new(Mutex::new(object))
+    Arc::new(RwLock::new(object))
 }
 
-type Atomic<T> = Arc<Mutex<T>>;
+type Atomic<T> = Arc<RwLock<T>>;
 
 /// App contains data strictly related to the chat.
 /// It is not responsible for authorization.
@@ -53,7 +52,6 @@ pub struct Client {
     handle: Handle,
     terminal: SshTerminal,
     textarea: TextArea<'static>,
-    buf: Vec<Cell>,
 }
 
 struct TerminalHandle {
@@ -136,10 +134,10 @@ impl AppServer {
     }
 
     async fn check_role_and_reload(&mut self) -> Result<(), Error> {
-        if self.id_to_user.lock().await[&self.id].role() == authfile::Role::Admin {
+        if self.entity().await.role() == authfile::Role::Admin {
             self.reload().await?;
         } else {
-            // write a helpful message to the bottom most statusline
+            // TODO: write a helpful message to the bottom most statusline
         }
         Ok(())
     }
@@ -149,12 +147,12 @@ impl AppServer {
 
         // freeze all maps in the server state
         {
-            let mut keychain = self.keychain.lock().await;
-            let mut key_data_pool = self.key_data_pool.lock().await;
-            let mut key_data_to_id = self.key_data_to_id.lock().await;
-            let mut key_data_to_user = self.key_data_to_user.lock().await;
-            let mut clients = self.clients.lock().await;
-            let mut id_to_user = self.id_to_user.lock().await;
+            let mut keychain = self.keychain.write().await;
+            let mut key_data_pool = self.key_data_pool.write().await;
+            let mut key_data_to_id = self.key_data_to_id.write().await;
+            let mut key_data_to_user = self.key_data_to_user.write().await;
+            let mut clients = self.clients.write().await;
+            let mut id_to_user = self.id_to_user.write().await;
 
             // find all strays
             for stray in key_data_pool.difference(&new_keychain.key_pool) {
@@ -187,12 +185,12 @@ impl AppServer {
     }
 
     async fn entity(&mut self) -> Arc<Entity> {
-        self.id_to_user.lock().await[&self.id].clone()
+        self.id_to_user.read().await[&self.id].clone()
     }
 
     async fn announce(&mut self) {
         let entity = self.entity().await;
-        self.app.lock().await.history.push(format!(
+        self.app.write().await.history.push(format!(
             "{} with {:?} privileges has joined",
             entity.name(),
             entity.role()
@@ -201,9 +199,9 @@ impl AppServer {
 
     async fn render(&mut self) {
         let clients = self.clients.clone();
-        let history: Vec<String> = self.app.lock().await.history.to_vec();
+        let history: Vec<String> = self.app.read().await.history.to_vec();
         tokio::spawn(async move {
-            for (_, client) in clients.lock().await.iter_mut() {
+            for (_, client) in clients.write().await.iter_mut() {
                 client
                     .terminal
                     .draw(|f| {
@@ -225,36 +223,34 @@ impl AppServer {
                         let paragraphs = List::new(paragraphs);
                         f.render_widget(paragraphs, layout[0]);
                         f.render_widget(&client.textarea, layout[1]);
-                        client.buf = f.buffer_mut().content.clone();
                     })
                     .unwrap();
             }
         });
     }
 
-    // Render textarea only for the client who happens to send
+    // Render textarea only for the client who sent
     // a keystroke
     async fn render_textarea(&mut self) {
         let clients = self.clients.clone();
         let id = self.id;
         tokio::spawn(async move {
-            let mut clients = clients.lock().await;
+            let mut clients = clients.write().await;
             let Client {
-                terminal,
-                textarea,
-                buf,
-                ..
+                terminal, textarea, ..
             } = clients.get_mut(&id).unwrap();
 
             terminal
                 .draw(|f| {
-                    let layout = Layout::default()
+                    let buf = f.buffer_mut();
+                    let area = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints(vec![Constraint::Fill(1), Constraint::Length(4)])
-                        .split(f.area());
-                    f.buffer_mut().content = buf.to_vec();
-                    f.render_widget(Clear, layout[1]);
-                    f.render_widget(&*textarea, layout[1]);
+                        .split(buf.area)[1];
+                    for i in 0..(area.width * area.y) as usize {
+                        buf.content[i].set_skip(true);
+                    }
+                    f.render_widget(&*textarea, area);
                 })
                 .unwrap();
         });
@@ -312,11 +308,10 @@ impl Handler for AppServer {
                     .title(title),
             );
 
-            let mut clients = self.clients.lock().await;
+            let mut clients = self.clients.write().await;
             clients.insert(
                 self.id,
                 Client {
-                    buf: vec![],
                     textarea,
                     channel,
                     handle,
@@ -330,10 +325,10 @@ impl Handler for AppServer {
 
     async fn auth_publickey(&mut self, _: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
         // Search for the key in our keychain
-        if let Some(entity) = self.key_data_to_user.lock().await.get(key.key_data()) {
+        if let Some(entity) = self.key_data_to_user.read().await.get(key.key_data()) {
             // freeze everything, again
-            let mut id_to_user = self.id_to_user.lock().await;
-            let mut key_data_to_id = self.key_data_to_id.lock().await;
+            let mut id_to_user = self.id_to_user.write().await;
+            let mut key_data_to_id = self.key_data_to_id.write().await;
 
             id_to_user.insert(self.id, entity.clone());
 
@@ -359,7 +354,7 @@ impl Handler for AppServer {
             [3] => return Err(russh::Error::Disconnect.into()),
             [13] => {
                 let text = {
-                    let mut clients = self.clients.lock().await;
+                    let mut clients = self.clients.write().await;
                     let current_client = clients.get_mut(&self.id).unwrap();
                     let text = current_client.textarea.lines().to_vec().join("\n");
 
@@ -375,13 +370,13 @@ impl Handler for AppServer {
                 };
                 let name = self.entity().await.name().to_string();
                 let message = format!("[{name}]: {text}");
-                self.app.lock().await.history.push(message);
+                self.app.write().await.history.push(message);
                 self.render().await;
             }
             // Alt-Return for multiline
             [27, 13] => {
                 self.clients
-                    .lock()
+                    .write()
                     .await
                     .get_mut(&self.id)
                     .unwrap()
@@ -399,7 +394,7 @@ impl Handler for AppServer {
                     }
                     Ok(keycode) => {
                         self.clients
-                            .lock()
+                            .write()
                             .await
                             .get_mut(&self.id)
                             .unwrap()
@@ -438,7 +433,7 @@ impl Handler for AppServer {
         };
 
         {
-            let mut clients = self.clients.lock().await;
+            let mut clients = self.clients.write().await;
             let client = clients.get_mut(&self.id).unwrap();
             client.terminal.resize(rect).unwrap();
 
@@ -467,7 +462,7 @@ impl Handler for AppServer {
         };
 
         {
-            let mut clients = self.clients.lock().await;
+            let mut clients = self.clients.write().await;
             match clients.get_mut(&self.id).unwrap().terminal.resize(rect) {
                 Ok(_) => {}
                 Err(e) => {
@@ -489,7 +484,7 @@ impl Drop for AppServer {
         let id = self.id;
         let clients = self.clients.clone();
         tokio::spawn(async move {
-            let mut clients = clients.lock().await;
+            let mut clients = clients.write().await;
             clients.remove(&id);
         });
     }
