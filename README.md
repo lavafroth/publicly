@@ -15,7 +15,7 @@ interface or by editing it externally.
 - [ ] `/commit` command to commit in-memory changes to Authfile
 - [ ] `/rename` command
 - [ ] `#mention` tags
-- [ ] Adjustable parameters like history size and Authfile paths
+- [x] Adjustable parameters like history size and Authfile paths
 
 ### Authfile
 

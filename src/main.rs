@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use authfile::Entity;
+use anyhow::Result;
+use clap::Parser;
 use ratatui::backend::TermionBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
@@ -17,7 +18,9 @@ use russh::{Channel, ChannelId, Pty};
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tui_textarea::TextArea;
+
 mod authfile;
+use authfile::Entity;
 
 type SshTerminal = Terminal<TermionBackend<TerminalHandle>>;
 
@@ -490,13 +493,27 @@ impl Drop for AppServer {
     }
 }
 
+#[derive(Parser, Debug)]
+#[command(version, about)]
+struct Args {
+    /// The number of messages to store in chat history before the first disappears
+    #[arg(long, default_value = "128")]
+    history_size: usize,
+
+    /// Path to the Authfile or the SSH authorized_keys file
+    #[arg(long, short, default_value = "./Authfile")]
+    authfile: String,
+}
+
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     env_logger::builder()
-        .filter_level(log::LevelFilter::Warn)
+        .filter_level(log::LevelFilter::Debug)
         .init();
 
-    let keychain = authfile::read(Path::new("./authfile")).await.unwrap();
+    let args = Args::parse();
+
+    let keychain = authfile::read(Path::new(&args.authfile)).await?;
     let key_data_pool = new_atomic(keychain.key_pool);
     let key_data_to_id = new_atomic(HashMap::new());
     let id_to_user = new_atomic(HashMap::new());
@@ -511,7 +528,7 @@ async fn main() {
     let keychain = new_atomic(keychain.entities);
 
     let app = App {
-        history: AllocRingBuffer::new(128),
+        history: AllocRingBuffer::new(args.history_size),
     };
 
     let app = new_atomic(app);
@@ -526,5 +543,6 @@ async fn main() {
         clients,
         id: 0,
     };
-    sh.run().await.unwrap();
+    sh.run().await?;
+    Ok(())
 }
