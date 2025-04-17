@@ -3,7 +3,7 @@
 Private chats using public keys.
 
 Publik aims to be an subset of IRC, replacing the "default permit" policy with "invite only".
-New users can be added by modifying the authorization file `authfile` either via the chat
+New users can be added by modifying the authorization file `Authfile` either via the chat
 interface or by editing it externally.
 
 ### Roadmap
@@ -12,26 +12,30 @@ interface or by editing it externally.
 - [x] Ability for admins to reload Authfile with `Ctrl` `r`
 - [x] Emacs-like shortcuts for textarea
 - [x] multiline support with `Alt` `Return`
+- [x] Adjustable parameters:
+  - [x] history size
+  - [x] Authfile path
+  - [ ] Listening port number
 - [ ] `/commit` command to commit in-memory changes to Authfile
 - [ ] `/rename` command
 - [ ] `#mention` tags
-- [x] Adjustable parameters like history size and Authfile paths
+- [ ] `/add` command to add new keys
 
 ### Authfile
 
-The `authfile` is the source of truth.
+The `Authfile` is the source of truth.
 
 Though keys can be added via the chat interface, unless they are committed using the `/commit`
 command, they will NOT persist on the subsequent runs or reload.
 
-Consider the following keys added to `authfile`
+Consider the following keys added to `Authfile`
 
 ```
 ssh-ed25519 AAAA... bob@work
 ssh-ed25519 AAAA... h@cafe:admin
 ```
 
-The authfile intentionally uses the same format as the `~/.ssh/authorized_keys` file,
+The Authfile intentionally uses the same format as the `~/.ssh/authorized_keys` file,
 with the only difference is that it parses the last field, the comment. This will be used
 to assign usernames.
 
@@ -41,12 +45,12 @@ people joining in with the respective privileges. Further, `bob@work` can join o
 `h@cafe`, whose comment is tagged as `:admin` will be able to join the chat with admin privileges.
 
 > [!NOTE]
-Usernames can only contain ASCII alphanumeric characters and the `@`
+Usernames may only contain ASCII alphanumeric characters and the `@`
 symbol. All other characters will be stripped.
 
 ### Getting started
 
-Create a file called `authfile` and add the SSH public keys of trusted members
+Create a file called `Authfile` and add the SSH public keys of trusted members
 as described in the previous section.
 
 Inside the project directory run
