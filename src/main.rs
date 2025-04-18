@@ -201,23 +201,26 @@ impl AppServer {
         let id = self.id;
         tokio::spawn(async move {
             let mut clients = clients.write().await;
-            let Client {
-                terminal, textarea, ..
-            } = clients.get_mut(&id).unwrap();
+            let client = clients.get_mut(&id).unwrap();
 
-            terminal
-                .draw(|f| {
-                    let buf = f.buffer_mut();
-                    let area = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints(vec![Constraint::Fill(1), Constraint::Length(4)])
-                        .split(buf.area)[1];
-                    for i in 0..(area.width * area.y) as usize {
-                        buf.content[i].set_skip(true);
-                    }
-                    f.render_widget(&*textarea, area);
-                })
-                .unwrap();
+            let res = client.terminal.draw(|f| {
+                let buf = f.buffer_mut();
+                let area = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints(vec![Constraint::Fill(1), Constraint::Length(4)])
+                    .split(buf.area)[1];
+                for i in 0..(area.width * area.y) as usize {
+                    buf.content[i].set_skip(true);
+                }
+                f.render_widget(&client.textarea, area);
+            });
+            if let Err(e) = res {
+                log::error!(
+                    "failed to render the chat interface for client {}: {}",
+                    client.channel,
+                    e
+                )
+            }
         });
     }
 }
@@ -329,9 +332,13 @@ impl Handler for AppServer {
                     text
                 };
                 let name = self.entity().await.name().to_string();
-                let message = format!("[{name}]: {text}");
-                self.app.write().await.history.push(message);
-                self.render().await;
+                // TODO: handle commands
+                let Some(command) = Command::parse(&text) else {
+                    let message = format!("[{name}]: {text}");
+                    self.app.write().await.history.push(message);
+                    self.render().await;
+                    return Ok(());
+                };
             }
             // Alt-Return for multiline
             [27, 13] => {
@@ -447,6 +454,27 @@ impl Drop for AppServer {
             let mut clients = clients.write().await;
             clients.remove(&id);
         });
+    }
+}
+
+pub enum Command {
+    Add { key: String },
+    Rename { from: String, to: String },
+}
+
+impl Command {
+    fn parse(text: &str) -> Option<Self> {
+        let split: Vec<&str> = text.split_whitespace().collect();
+        Some(match &split[..] {
+            ["/add", key] => Self::Add {
+                key: key.to_string(),
+            },
+            ["/rename", to, from] => Self::Rename {
+                to: to.to_string(),
+                from: from.to_string(),
+            },
+            _ => return None,
+        })
     }
 }
 
