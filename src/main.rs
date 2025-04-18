@@ -16,11 +16,12 @@ use russh::keys::{PublicKey, ssh_key::public::KeyData, ssh_key::rand_core::OsRng
 use russh::server::{Auth, Config, Handle, Handler, Msg, Server, Session};
 use russh::{Channel, ChannelId, Pty};
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tui_textarea::TextArea;
 
 mod authfile;
+mod terminal_handle;
 use authfile::Entity;
+use terminal_handle::TerminalHandle;
 
 type SshTerminal = Terminal<TermionBackend<TerminalHandle>>;
 
@@ -57,51 +58,6 @@ pub struct Client {
     textarea: TextArea<'static>,
 }
 
-struct TerminalHandle {
-    sender: UnboundedSender<Vec<u8>>,
-    // The sink collects the data which is finally sent to sender.
-    sink: Vec<u8>,
-}
-
-impl TerminalHandle {
-    async fn start(handle: Handle, channel_id: ChannelId) -> Self {
-        let (sender, mut receiver) = unbounded_channel::<Vec<u8>>();
-        tokio::spawn(async move {
-            while let Some(data) = receiver.recv().await {
-                let result = handle.data(channel_id, data.into()).await;
-                if result.is_err() {
-                    eprintln!("Failed to send data: {:?}", result);
-                }
-            }
-        });
-        Self {
-            sender,
-            sink: Vec::new(),
-        }
-    }
-}
-
-// The crossterm backend writes to the terminal handle.
-impl std::io::Write for TerminalHandle {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.sink.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        let result = self.sender.send(self.sink.clone());
-        if result.is_err() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                result.unwrap_err(),
-            ));
-        }
-
-        self.sink.clear();
-        Ok(())
-    }
-}
-
 #[derive(Clone)]
 struct AppServer {
     keychain: Atomic<Vec<Arc<Entity>>>,
@@ -112,8 +68,8 @@ struct AppServer {
     clients: Atomic<HashMap<usize, Client>>,
 
     id: usize,
+    args: Args,
     app: Atomic<App>,
-    port: u16,
 }
 
 impl AppServer {
@@ -126,13 +82,13 @@ impl AppServer {
             auth_rejection_time: std::time::Duration::from_secs(3),
             auth_rejection_time_initial: Some(std::time::Duration::from_secs(0)),
             methods,
-            keys: vec![
-                russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519)
-                    .unwrap(),
-            ],
+            keys: vec![russh::keys::PrivateKey::random(
+                &mut OsRng,
+                russh::keys::Algorithm::Ed25519,
+            )?],
             ..Default::default()
         };
-        self.run_on_address(Arc::new(config), ("0.0.0.0", self.port))
+        self.run_on_address(Arc::new(config), ("0.0.0.0", self.args.port))
             .await?;
         Ok(())
     }
@@ -147,7 +103,7 @@ impl AppServer {
     }
 
     async fn reload(&mut self) -> Result<(), Error> {
-        let new_keychain = authfile::read(Path::new("./authfile")).await?;
+        let new_keychain = authfile::read(Path::new(&self.args.authfile)).await?;
 
         // freeze all maps in the server state
         {
@@ -173,6 +129,8 @@ impl AppServer {
                     clients.remove(id);
                     id_to_user.remove(id);
                 }
+
+                // kick em out
                 key_data_to_id.remove(stray);
             }
 
@@ -206,29 +164,32 @@ impl AppServer {
         let history: Vec<String> = self.app.read().await.history.to_vec();
         tokio::spawn(async move {
             for (_, client) in clients.write().await.iter_mut() {
-                client
-                    .terminal
-                    .draw(|f| {
-                        // clear the screen
-                        let area = f.area();
-                        f.render_widget(Clear, area);
+                let res = client.terminal.draw(|f| {
+                    // clear the screen
+                    f.render_widget(Clear, f.area());
 
-                        let layout = Layout::default()
-                            .direction(Direction::Vertical)
-                            .constraints(vec![Constraint::Fill(1), Constraint::Length(4)])
-                            .split(f.area());
-                        let style = Style::default().fg(Color::Green);
+                    let layout = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints(vec![Constraint::Fill(1), Constraint::Length(4)])
+                        .split(f.area());
+                    let style = Style::default().fg(Color::Green);
 
-                        let paragraphs: Vec<_> = history
-                            .iter()
-                            .map(|message| Text::styled(message.to_string(), style))
-                            .collect();
+                    let paragraphs: Vec<_> = history
+                        .iter()
+                        .map(|message| Text::styled(message.to_string(), style))
+                        .collect();
 
-                        let paragraphs = List::new(paragraphs);
-                        f.render_widget(paragraphs, layout[0]);
-                        f.render_widget(&client.textarea, layout[1]);
-                    })
-                    .unwrap();
+                    let paragraphs = List::new(paragraphs);
+                    f.render_widget(paragraphs, layout[0]);
+                    f.render_widget(&client.textarea, layout[1]);
+                });
+                if let Err(e) = res {
+                    log::error!(
+                        "failed to render the chat interface for client {}: {}",
+                        client.channel,
+                        e
+                    )
+                }
             }
         });
     }
@@ -297,12 +258,7 @@ impl Handler for AppServer {
             let terminal = Terminal::with_options(backend, options).unwrap();
             let title = {
                 let entity = self.entity().await;
-                let role = if entity.role() == authfile::Role::Admin {
-                    "-[admin]"
-                } else {
-                    ""
-                };
-                format!("[{}]{}", entity.name(), role)
+                format!("[{} {}]", entity.name(), entity.role().to_string())
             };
 
             let mut textarea = TextArea::default();
@@ -352,17 +308,17 @@ impl Handler for AppServer {
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // Sending Ctrl+C ends the session and disconnects the client
-
         match data {
+            // Sending Ctrl+C ends the session and disconnects the client
             [3] => return Err(russh::Error::Disconnect.into()),
+            // Press Return to send a message
             [13] => {
                 let text = {
                     let mut clients = self.clients.write().await;
                     let current_client = clients.get_mut(&self.id).unwrap();
                     let text = current_client.textarea.lines().to_vec().join("\n");
 
-                    // HACK: Clear the message on send.
+                    // HACK: Clear the textarea on send.
                     // Select all, delete.
                     current_client.textarea.select_all();
                     current_client
@@ -494,7 +450,7 @@ impl Drop for AppServer {
     }
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(version, about)]
 struct Args {
     /// The number of messages to store in chat history before the first disappears
@@ -546,7 +502,7 @@ async fn main() -> Result<()> {
         key_data_pool,
         key_data_to_user,
         clients,
-        port: args.port,
+        args,
         id: 0,
     };
     sh.run().await?;
