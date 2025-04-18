@@ -16,10 +16,10 @@ interface or by editing it externally.
   - [x] history size
   - [x] Authfile path
   - [x] Listening port number
+- [x] `/add` command to add new keys
+- [x] `/rename` command
 - [ ] `/commit` command to commit in-memory changes to Authfile
-- [ ] `/rename` command
 - [ ] `#mention` tags
-- [ ] `/add` command to add new keys
 
 ### Authfile
 

@@ -60,11 +60,11 @@ pub struct Client {
 
 #[derive(Clone)]
 struct AppServer {
-    keychain: Atomic<Vec<Arc<Entity>>>,
+    keychain: Atomic<Vec<Atomic<Entity>>>,
     key_data_pool: Atomic<HashSet<KeyData>>,
-    key_data_to_user: Atomic<HashMap<KeyData, Arc<Entity>>>,
+    key_data_to_user: Atomic<HashMap<KeyData, Atomic<Entity>>>,
     key_data_to_id: Atomic<HashMap<KeyData, Vec<usize>>>,
-    id_to_user: Atomic<HashMap<usize, Arc<Entity>>>,
+    id_to_user: Atomic<HashMap<usize, Atomic<Entity>>>,
     clients: Atomic<HashMap<usize, Client>>,
 
     id: usize,
@@ -94,7 +94,7 @@ impl AppServer {
     }
 
     async fn check_role_and_reload(&mut self) -> Result<(), Error> {
-        if self.entity().await.role() == authfile::Role::Admin {
+        if self.entity().await.read().await.role() == authfile::Role::Admin {
             self.reload().await?;
         } else {
             // TODO: write a helpful message to the bottom most statusline
@@ -134,11 +134,13 @@ impl AppServer {
                 key_data_to_id.remove(stray);
             }
 
-            *key_data_to_user = new_keychain
-                .entities
-                .iter()
-                .map(|e| (e.key_data(), e.clone()))
-                .collect();
+            let mut new_key_data_to_user = HashMap::new();
+
+            for entity in new_keychain.entities.iter() {
+                new_key_data_to_user.insert(entity.read().await.key_data(), entity.clone());
+            }
+
+            *key_data_to_user = new_key_data_to_user;
             *keychain = new_keychain.entities;
             *key_data_pool = new_keychain.key_pool;
         }
@@ -146,12 +148,13 @@ impl AppServer {
         Ok(())
     }
 
-    async fn entity(&mut self) -> Arc<Entity> {
+    async fn entity(&mut self) -> Atomic<Entity> {
         self.id_to_user.read().await[&self.id].clone()
     }
 
     async fn announce(&mut self) {
         let entity = self.entity().await;
+        let entity = entity.read().await;
         self.app.write().await.history.push(format!(
             "{} with {:?} privileges has joined",
             entity.name(),
@@ -261,6 +264,7 @@ impl Handler for AppServer {
             let terminal = Terminal::with_options(backend, options).unwrap();
             let title = {
                 let entity = self.entity().await;
+                let entity = entity.read().await;
                 format!("[{} {}]", entity.name(), entity.role())
             };
 
@@ -331,7 +335,7 @@ impl Handler for AppServer {
                         ));
                     text
                 };
-                let name = self.entity().await.name().to_string();
+                let name = self.entity().await.read().await.name().to_string();
                 // TODO: handle commands
                 let Some(command) = Command::parse(&text) else {
                     let message = format!("[{name}]: {text}");
@@ -339,6 +343,58 @@ impl Handler for AppServer {
                     self.render().await;
                     return Ok(());
                 };
+
+                match command {
+                    Command::Add(entity) => {
+                        let mut keychain = self.keychain.write().await;
+                        let mut key_data_pool = self.key_data_pool.write().await;
+
+                        let key_data = entity.key_data();
+
+                        keychain.push(new_atomic(entity));
+                        key_data_pool.insert(key_data);
+                    }
+                    Command::Rename { from, to } => {
+                        let from = from
+                            .split_once(':')
+                            .map(|(sanitized, _ignore_role)| sanitized.to_string())
+                            .unwrap_or(from);
+
+                        let to = to
+                            .split_once(':')
+                            .map(|(sanitized, _ignore_role)| sanitized.to_string())
+                            .unwrap_or(to);
+
+                        log::info!("renaming {:?} to {:?}", from, to);
+
+                        let kc = self.keychain.read().await;
+                        for ent in kc.iter() {
+                            if ent.read().await.name() != from {
+                                continue;
+                            }
+
+                            ent.write().await.set_name(&to);
+
+                            let ent = ent.read().await.clone();
+                            let kd_2_id = self.key_data_to_id.read().await;
+                            let ids = kd_2_id.get(&ent.key_data()).unwrap();
+                            for id in ids {
+                                let mut clients = self.clients.write().await;
+                                let client = clients.get_mut(id).unwrap();
+
+                                let title = format!("[{} {}]", ent.name(), ent.role());
+
+                                let block = Block::bordered()
+                                    .border_type(BorderType::Rounded)
+                                    .title(title);
+                                client.textarea.set_block(block);
+                            }
+                        }
+                    }
+                }
+                // TODO: re-render the textarea since it displays the current
+                // user's details
+                self.render().await;
             }
             // Alt-Return for multiline
             [27, 13] => {
@@ -458,21 +514,25 @@ impl Drop for AppServer {
 }
 
 pub enum Command {
-    Add { key: String },
+    Add(Entity),
     Rename { from: String, to: String },
 }
 
 impl Command {
     fn parse(text: &str) -> Option<Self> {
-        let split: Vec<&str> = text.split_whitespace().collect();
-        Some(match &split[..] {
-            ["/add", key] => Self::Add {
-                key: key.to_string(),
-            },
-            ["/rename", to, from] => Self::Rename {
-                to: to.to_string(),
-                from: from.to_string(),
-            },
+        let split = text.split_once(char::is_whitespace);
+        Some(match split {
+            Some(("/add", payload)) => Self::Add(payload.try_into().unwrap()),
+            Some(("/rename", payload)) => {
+                let split_payload: Vec<&str> = payload.split_whitespace().collect();
+                match split_payload.as_slice() {
+                    [from, to] => Self::Rename {
+                        to: to.to_string(),
+                        from: from.to_string(),
+                    },
+                    _ => return None, // TODO: return an error message
+                }
+            }
             _ => return None,
         })
     }
@@ -507,13 +567,13 @@ async fn main() -> Result<()> {
     let key_data_to_id = new_atomic(HashMap::new());
     let id_to_user = new_atomic(HashMap::new());
     let clients = new_atomic(HashMap::new());
-    let key_data_to_user = new_atomic(
-        keychain
-            .entities
-            .iter()
-            .map(|e| (e.key_data(), e.clone()))
-            .collect(),
-    );
+
+    let mut raw_key_data_to_user = HashMap::new();
+    for entity in keychain.entities.iter() {
+        raw_key_data_to_user.insert(entity.read().await.key_data(), entity.clone());
+    }
+
+    let key_data_to_user = new_atomic(raw_key_data_to_user);
     let keychain = new_atomic(keychain.entities);
 
     let app = App {

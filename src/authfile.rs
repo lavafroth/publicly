@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::RwLock;
 
 use russh::keys::PublicKey;
 use russh::keys::ssh_key::public::KeyData;
@@ -26,7 +27,22 @@ pub async fn read(path: &Path) -> Result<AuthFile, Error> {
     let mut entities = vec![];
     for line in reader.lines() {
         let line = line?;
-        let key = PublicKey::from_openssh(&line)?;
+        let entity: Entity = line.as_str().try_into()?;
+        entities.push(entity);
+    }
+    let key_pool = build_key_data_pool(&entities);
+    let entities = entities
+        .into_iter()
+        .map(|entity| Arc::new(RwLock::new(entity)))
+        .collect();
+    Ok(AuthFile { entities, key_pool })
+}
+
+impl TryFrom<&str> for Entity {
+    type Error = Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let key = PublicKey::from_openssh(value)?;
 
         let comment = key.comment();
         let (name, role) = match comment.rsplit_once(":") {
@@ -37,23 +53,20 @@ pub async fn read(path: &Path) -> Result<AuthFile, Error> {
             }
         };
 
-        let authorized_entity = Entity {
+        Ok(Entity {
             name: sanitize_name(name),
             role,
             key,
-        };
-        entities.push(authorized_entity.into());
+        })
     }
-    let key_pool = build_key_data_pool(&entities);
-    Ok(AuthFile { entities, key_pool })
 }
 
-fn build_key_data_pool(entities: &[Arc<Entity>]) -> HashSet<KeyData> {
+fn build_key_data_pool(entities: &[Entity]) -> HashSet<KeyData> {
     entities.iter().map(|e| e.key_data()).collect()
 }
 
 pub struct AuthFile {
-    pub entities: Vec<Arc<Entity>>,
+    pub entities: Vec<Arc<RwLock<Entity>>>,
     pub key_pool: HashSet<KeyData>,
 }
 
