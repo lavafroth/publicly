@@ -258,7 +258,7 @@ impl Handler for AppServer {
             let terminal = Terminal::with_options(backend, options).unwrap();
             let title = {
                 let entity = self.entity().await;
-                format!("[{} {}]", entity.name(), entity.role().to_string())
+                format!("[{} {}]", entity.name(), entity.role())
             };
 
             let mut textarea = TextArea::default();

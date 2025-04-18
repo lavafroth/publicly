@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt::Display;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
@@ -112,12 +113,12 @@ pub enum Role {
     Normal,
 }
 
-impl ToString for Role {
-    fn to_string(&self) -> String {
-        match self {
+impl Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let role = match self {
             Role::Admin => "admin",
             Role::Normal => "normal",
-        }
-        .to_string()
+        };
+        write!(f, "{role}")
     }
 }
