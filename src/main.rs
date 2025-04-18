@@ -317,7 +317,13 @@ impl Handler for AppServer {
             [13] => {
                 let text = {
                     let mut clients = self.clients.write().await;
-                    let current_client = clients.get_mut(&self.id).unwrap();
+                    let Some(current_client) = clients.get_mut(&self.id) else {
+                        log::warn!(
+                            "failed to get handle on the current client with id: {}",
+                            self.id
+                        );
+                        return Ok(());
+                    };
                     let text = current_client.textarea.lines().to_vec().join("\n");
 
                     // HACK: Clear the textarea on send.
@@ -375,8 +381,12 @@ impl Handler for AppServer {
                             let ids = kd_2_id.get(&ent.key_data()).unwrap();
                             for id in ids {
                                 let mut clients = self.clients.write().await;
-                                let client = clients.get_mut(id).unwrap();
-
+                                let Some(client) = clients.get_mut(id) else {
+                                    log::warn!(
+                                        "failed to get handle on client with id: {id}, considering them disconnected"
+                                    );
+                                    return Ok(());
+                                };
 
                                 let block = Block::bordered()
                                     .border_type(BorderType::Rounded)
@@ -391,13 +401,17 @@ impl Handler for AppServer {
             }
             // Alt-Return for multiline
             [27, 13] => {
-                self.clients
-                    .write()
-                    .await
-                    .get_mut(&self.id)
-                    .unwrap()
-                    .textarea
-                    .input(Event::Key(Key::Char('\n')));
+                {
+                    let mut clients = self.clients.write().await;
+                    let Some(client) = clients.get_mut(&self.id) else {
+                        log::warn!(
+                            "failed to get handle on the current client with id: {}",
+                            self.id
+                        );
+                        return Ok(());
+                    };
+                    client.textarea.input(Event::Key(Key::Char('\n')));
+                }
                 self.render_textarea().await;
             }
 
@@ -450,8 +464,20 @@ impl Handler for AppServer {
 
         {
             let mut clients = self.clients.write().await;
-            let client = clients.get_mut(&self.id).unwrap();
-            client.terminal.resize(rect).unwrap();
+            let Some(client) = clients.get_mut(&self.id) else {
+                log::warn!(
+                    "failed to get handle on the current client with id: {}",
+                    self.id
+                );
+                return Ok(());
+            };
+            if let Err(error) = client.terminal.resize(rect) {
+                log::error!(
+                    "failed to respond to terminal resize for client {}: {:#?}",
+                    self.id,
+                    error
+                );
+            };
 
             session.channel_success(channel)?;
         }
