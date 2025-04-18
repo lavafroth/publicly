@@ -101,7 +101,7 @@ pub enum Error {
     #[error("unable to read authorization file")]
     FileNotReadable(#[from] std::io::Error),
     #[error("failed to parse public key")]
-    PublicKeyParsingError(#[from] russh::keys::ssh_key::Error),
+    PublicKeyParsing(#[from] russh::keys::ssh_key::Error),
     #[error("invalid role specified in authorization file at line: {0}")]
     InvalidRole(String),
 }
