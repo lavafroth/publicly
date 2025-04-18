@@ -111,3 +111,13 @@ pub enum Role {
     Admin,
     Normal,
 }
+
+impl ToString for Role {
+    fn to_string(&self) -> String {
+        match self {
+            Role::Admin => "admin",
+            Role::Normal => "normal",
+        }
+        .to_string()
+    }
+}
