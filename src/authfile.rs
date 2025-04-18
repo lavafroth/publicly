@@ -105,6 +105,10 @@ impl Entity {
         self.role
     }
 
+    pub fn title(&self) -> String {
+        format!("[{} {}]", self.name(), self.role())
+    }
+
     pub fn key_data(&self) -> KeyData {
         self.key.key_data().clone()
     }

@@ -262,17 +262,12 @@ impl Handler for AppServer {
             };
 
             let terminal = Terminal::with_options(backend, options).unwrap();
-            let title = {
-                let entity = self.entity().await;
-                let entity = entity.read().await;
-                format!("[{} {}]", entity.name(), entity.role())
-            };
 
             let mut textarea = TextArea::default();
             textarea.set_block(
                 Block::bordered()
                     .border_type(BorderType::Rounded)
-                    .title(title),
+                    .title(self.entity().await.read().await.title()),
             );
 
             let mut clients = self.clients.write().await;
@@ -382,18 +377,16 @@ impl Handler for AppServer {
                                 let mut clients = self.clients.write().await;
                                 let client = clients.get_mut(id).unwrap();
 
-                                let title = format!("[{} {}]", ent.name(), ent.role());
 
                                 let block = Block::bordered()
                                     .border_type(BorderType::Rounded)
-                                    .title(title);
+                                    .title(ent.title());
                                 client.textarea.set_block(block);
                             }
                         }
                     }
                 }
-                // TODO: re-render the textarea since it displays the current
-                // user's details
+                // re-render
                 self.render().await;
             }
             // Alt-Return for multiline
