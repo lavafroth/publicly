@@ -113,6 +113,7 @@ struct AppServer {
 
     id: usize,
     app: Atomic<App>,
+    port: u16,
 }
 
 impl AppServer {
@@ -131,7 +132,7 @@ impl AppServer {
             ],
             ..Default::default()
         };
-        self.run_on_address(Arc::new(config), ("0.0.0.0", 2222))
+        self.run_on_address(Arc::new(config), ("0.0.0.0", self.port))
             .await?;
         Ok(())
     }
@@ -503,6 +504,10 @@ struct Args {
     /// Path to the Authfile or the SSH authorized_keys file
     #[arg(long, short, default_value = "./Authfile")]
     authfile: String,
+
+    /// Port to listen on for incoming connections
+    #[arg(long, short, default_value = "2222")]
+    port: u16,
 }
 
 #[tokio::main]
@@ -541,6 +546,7 @@ async fn main() -> Result<()> {
         key_data_pool,
         key_data_to_user,
         clients,
+        port: args.port,
         id: 0,
     };
     sh.run().await?;

@@ -15,7 +15,7 @@ interface or by editing it externally.
 - [x] Adjustable parameters:
   - [x] history size
   - [x] Authfile path
-  - [ ] Listening port number
+  - [x] Listening port number
 - [ ] `/commit` command to commit in-memory changes to Authfile
 - [ ] `/rename` command
 - [ ] `#mention` tags
