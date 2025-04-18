@@ -10,7 +10,7 @@ use russh::keys::ssh_key::public::KeyData;
 pub fn sanitize_name(s: &str) -> String {
     let mut sanitized = String::with_capacity(s.len());
     for c in s.chars() {
-        let ok = c.is_ascii_alphanumeric() || c == '@';
+        let ok = c.is_ascii_alphanumeric() || "@_-.".contains(c);
         if !ok {
             continue;
         }

@@ -45,8 +45,8 @@ people joining in with the respective privileges. Further, `bob@work` can join o
 `h@cafe`, whose comment is tagged as `:admin` will be able to join the chat with admin privileges.
 
 > [!NOTE]
-Usernames may only contain ASCII alphanumeric characters and the `@`
-symbol. All other characters will be stripped.
+Usernames may only contain ASCII alphanumeric characters and the symbols `@-_.`.
+All other characters will be stripped.
 
 ### Getting started
 
