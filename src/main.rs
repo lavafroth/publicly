@@ -183,11 +183,11 @@ impl AppServer {
                     f.render_widget(paragraphs, layout[0]);
                     f.render_widget(&client.textarea, layout[1]);
                 });
-                if let Err(e) = res {
+                if let Err(error) = res {
                     log::error!(
-                        "failed to render the chat interface for client {}: {}",
+                        "failed to render the chat interface for client {}: {:#?}",
                         client.channel,
-                        e
+                        error
                     )
                 }
             }
@@ -214,11 +214,11 @@ impl AppServer {
                 }
                 f.render_widget(&client.textarea, area);
             });
-            if let Err(e) = res {
+            if let Err(error) = res {
                 log::error!(
-                    "failed to render the chat interface for client {}: {}",
+                    "failed to render textarea for user: client {}: {:#?}",
                     client.channel,
-                    e
+                    error
                 )
             }
         });
@@ -232,8 +232,8 @@ impl Server for AppServer {
         self.id += 1;
         s
     }
-    fn handle_session_error(&mut self, _error: <Self::Handler as russh::server::Handler>::Error) {
-        eprintln!("Session error: {:#?}", _error);
+    fn handle_session_error(&mut self, error: <Self::Handler as russh::server::Handler>::Error) {
+        log::error!("session error: {:#?}", error);
     }
 }
 
@@ -249,7 +249,7 @@ impl Handler for AppServer {
             // let entity = self.entity().await;
             let channel = channel.id();
             let handle = session.handle();
-            let terminal_handle = TerminalHandle::start(handle.clone(), channel.clone()).await;
+            let terminal_handle = TerminalHandle::start(handle.clone(), channel).await;
 
             let backend = TermionBackend::new(terminal_handle);
 
