@@ -17,7 +17,7 @@
       {
         packages.default = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
           pname = "publik";
-          version = "0.2.0";
+          version = "0.2.1";
 
           src = ./.;
           cargoLock = {

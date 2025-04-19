@@ -315,7 +315,6 @@ impl Handler for AppServer {
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        log::info!("you sent me: {data:#?}");
         match data {
             // Sending Ctrl+C ends the session and disconnects the client
             [3] => return Err(russh::Error::Disconnect.into()),
@@ -467,139 +466,32 @@ impl Handler for AppServer {
                 }
                 self.render_textarea().await;
             }
-
-            data if data.ends_with(&[10]) => {
-                let name = self.entity().await.read().await.name().to_string();
-                let text = std::str::from_utf8(&data[..data.len() - 1]).unwrap();
-
-                let maybe_command = match Command::parse(&text) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        log::error!("{e:?}");
-                        return Ok(());
-                    }
-                };
-                let Some(command) = maybe_command else {
-                    let message = format!("[{name}]: {text}");
-                    self.app.write().await.history.push(message);
-                    self.render().await;
-                    return Ok(());
-                };
-
-                match command {
-                    Command::Add(entity) => {
-                        if self.entity().await.read().await.role() != authfile::Role::Admin {
-                            // TODO: tell em "you're not an admin lol kekw"
-                            return Ok(());
-                        }
-                        log::info!("attempting to add {:#?}", entity);
-                        let mut keychain = self.keychain.write().await;
-                        let mut key_data_pool = self.key_data_pool.write().await;
-                        let mut key_data_to_user = self.key_data_to_user.write().await;
-
-                        let key_data = entity.key_data();
-
-                        let entity = new_atomic(entity);
-                        keychain.push(entity.clone());
-                        key_data_pool.insert(key_data.clone());
-                        key_data_to_user.insert(key_data, entity);
-                    }
-                    Command::Rename { from, to } => {
-                        if self.entity().await.read().await.role() != authfile::Role::Admin {
-                            // TODO: tell em "you're not an admin lol kekw"
-                            return Ok(());
-                        }
-                        let from = from
-                            .split_once(':')
-                            .map(|(sanitized, _ignore_role)| sanitized.to_string())
-                            .unwrap_or(from);
-
-                        let to = to
-                            .split_once(':')
-                            .map(|(sanitized, _ignore_role)| sanitized.to_string())
-                            .unwrap_or(to);
-
-                        log::info!("renaming {:?} to {:?}", from, to);
-
-                        let kc = self.keychain.read().await;
-                        for ent in kc.iter() {
-                            if ent.read().await.name() != from {
-                                continue;
-                            }
-
-                            ent.write().await.set_name(&to);
-
-                            let ent = ent.read().await.clone();
-                            let kd_2_id = self.key_data_to_id.read().await;
-                            // TODO: remove stray ids from key_data_to_id
-                            // and id_to_user
-                            let ids = kd_2_id.get(&ent.key_data()).unwrap();
-                            for id in ids {
-                                let mut clients = self.clients.write().await;
-                                let Some(client) = clients.get_mut(id) else {
-                                    log::warn!(
-                                        "failed to get handle on client with id: {id}, considering them disconnected"
-                                    );
-                                    continue;
-                                };
-
-                                let block = Block::bordered()
-                                    .border_type(BorderType::Rounded)
-                                    .title(ent.title());
-                                client.textarea.set_block(block);
-                            }
-                        }
-                    }
-                    Command::Commit => {
-                        if self.entity().await.read().await.role() != authfile::Role::Admin {
-                            // TODO: tell em "you're not an admin lol kekw"
-                            return Ok(());
-                        }
-                        let keychain = self.keychain.read().await;
-                        let mut pubkeys = vec![];
-                        for entity in keychain.iter() {
-                            let ent_str = entity.read().await.to_pubkey().to_string();
-                            pubkeys.push(ent_str);
-                        }
-                        let pubkeys = pubkeys.join("\n");
-                        let mut tmpfile = self.args.authfile.clone();
-                        tmpfile.push('~');
-                        if let Err(e) = std::fs::write(&tmpfile, pubkeys) {
-                            log::error!(
-                                "failed to create temporary file to commit in-memory authorized keys: {e:#?}"
-                            );
-                            return Ok(());
-                        };
-                        if let Err(e) = std::fs::rename(tmpfile, &self.args.authfile) {
-                            log::error!(
-                                "failed to move temporary file to original authfile: {e:#?}: do we have write permissions to it?"
-                            );
-                            return Ok(());
-                        };
-                    }
-                }
-            }
-
             data if !data.is_empty() => {
-                let mut iterator = data.iter().skip(1).map(|d| Ok(*d));
-                match ratatui::termion::event::parse_event(data[0], &mut iterator) {
-                    // Press `Ctrl-r` to reload the authorization file
-                    Ok(Event::Key(Key::Ctrl('r'))) => {
-                        self.check_role_and_reload().await?;
-                    }
-                    Ok(keycode) => {
-                        let mut clients = self.clients.write().await;
-                        let Some(client) = clients.get_mut(&self.id) else {
-                            log::warn!(
-                                "failed to get handle on the current client with id: {}",
-                                self.id
-                            );
-                            return Ok(());
-                        };
-                        client.textarea.input(keycode);
-                    }
-                    Err(e) => {
-                        log::warn!("failed to parse keyboard input data: {:?}: {e}", data);
+                let mut iterator = data.iter().map(|d| Ok(*d));
+                loop {
+                    let Some(Ok(first)) = iterator.next() else {
+                        break;
+                    };
+
+                    match ratatui::termion::event::parse_event(first, &mut iterator) {
+                        // Press `Ctrl-r` to reload the authorization file
+                        Ok(Event::Key(Key::Ctrl('r'))) => {
+                            self.check_role_and_reload().await?;
+                        }
+                        Ok(keycode) => {
+                            let mut clients = self.clients.write().await;
+                            let Some(client) = clients.get_mut(&self.id) else {
+                                log::warn!(
+                                    "failed to get handle on the current client with id: {}",
+                                    self.id
+                                );
+                                return Ok(());
+                            };
+                            client.textarea.input(keycode);
+                        }
+                        Err(e) => {
+                            log::warn!("failed to parse keyboard input data: {:?}: {e}", data);
+                        }
                     }
                 }
                 self.render_textarea().await;
