@@ -70,7 +70,7 @@ pub struct AuthFile {
     pub key_pool: HashSet<KeyData>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Entity {
     name: String,
     role: Role,

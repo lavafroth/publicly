@@ -17,8 +17,9 @@ interface or by editing it externally.
   - [x] Authfile path
   - [x] Listening port number
 - [x] `/add` command to add new keys
+Run it as `echo "ssh-ed25519 somekey" | ssh chatroom`
 - [x] `/rename` command
-- [ ] `/commit` command to commit in-memory changes to Authfile
+- [x] `/commit` command to commit in-memory changes to Authfile
 - [ ] `#mention` tags
 
 ### Authfile
