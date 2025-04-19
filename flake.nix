@@ -1,5 +1,5 @@
 {
-  description = "devshell for github:lavafroth/publik";
+  description = "devshell for github:lavafroth/publicly";
 
   inputs.flake-utils.url = "github:numtide/flake-utils";
 
@@ -16,7 +16,7 @@
       in
       {
         packages.default = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
-          pname = "publik";
+          pname = "publicly";
           version = "0.2.1";
 
           src = ./.;

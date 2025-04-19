@@ -1,8 +1,9 @@
-# publik
+# publicly
 
-Private chats using public keys.
+Authenticate publicly, chat privately.
 
-Publik aims to be an subset of IRC, replacing the "default permit" policy with "invite only".
+*Publicly* aims to mirror a subset of IRC, replacing the "default permit" policy with "invite only".
+
 New users can be added by modifying the authorization file `Authfile` either via the chat
 interface or by editing it externally.
 
@@ -36,11 +37,10 @@ ssh-ed25519 AAAA... h@cafe:admin
 ```
 
 The Authfile intentionally uses the same format as the `~/.ssh/authorized_keys` file,
-with the only difference is that it parses the last field, the comment. This will be used
-to assign usernames.
+with the only difference being that it parses the last field, the comment, to assign usernames.
 
 For example, the first key has a comment `bob@work` which will be the username assigned to
-people joining in with the respective privileges. Further, `bob@work` can join only with normal privileges.
+anyone joining with the respective key. Further, `bob@work` can join only with normal privileges.
 
 `h@cafe`, whose comment is tagged as `:admin` will be able to join the chat with admin privileges.
 
