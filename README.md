@@ -26,10 +26,10 @@ interface or by editing it externally.
 
 The `Authfile` is the source of truth.
 
-Though keys can be added via the chat interface, unless they are committed using the `/commit`
-command, they will NOT persist on the subsequent runs or reload.
+Keys can be added via the chat interface but they won't persist over multiple runs of the server
+unless they are committed using the `/commit` command.
 
-Consider the following keys added to `Authfile`
+Consider the keys in the example `Authfile`
 
 ```
 ssh-ed25519 AAAA... bob@work
