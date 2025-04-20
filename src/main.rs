@@ -51,6 +51,8 @@ pub enum Error {
     FrameResize { source: std::io::Error, id: usize },
     #[error("failed to parse command {0:#?}")]
     CommandParse(String),
+    #[error("unable to spawn a terminal for client {id}")]
+    TerminalSessionSpawn { source: std::io::Error, id: usize },
 }
 
 pub struct Client {
@@ -266,7 +268,12 @@ impl Handler for AppServer {
                 viewport: Viewport::Fixed(Rect::default()),
             };
 
-            let terminal = Terminal::with_options(backend, options).unwrap();
+            let terminal = Terminal::with_options(backend, options).map_err(|source| {
+                Error::TerminalSessionSpawn {
+                    source,
+                    id: self.id,
+                }
+            })?;
 
             let mut textarea = TextArea::default();
             textarea.set_block(
@@ -317,7 +324,24 @@ impl Handler for AppServer {
     ) -> Result<(), Self::Error> {
         match data {
             // Sending Ctrl+C ends the session and disconnects the client
-            [3] => return Err(russh::Error::Disconnect.into()),
+            [3] => {
+                let mut key_data_to_id = self.key_data_to_id.write().await;
+                let mut id_to_user = self.id_to_user.write().await;
+
+                let Some(entity) = id_to_user.get(&self.id) else {
+                    log::warn!(
+                        "could not look up the entity corresponding to the current id: {}",
+                        self.id
+                    );
+                    return Err(russh::Error::Disconnect.into());
+                };
+                let stray_kd = entity.read().await.key_data();
+                key_data_to_id.remove(&stray_kd);
+
+                id_to_user.remove(&self.id);
+                self.clients.write().await.remove(&self.id);
+                return Err(russh::Error::Disconnect.into());
+            }
             // Press Return to send a message
             [13] => {
                 let text = {
@@ -359,7 +383,7 @@ impl Handler for AppServer {
                 match command {
                     Command::Add(entity) => {
                         if self.entity().await.read().await.role() != authfile::Role::Admin {
-                            // TODO: tell em "you're not an admin lol kekw"
+                            // TODO: write to statusline: you are not an admin
                             return Ok(());
                         }
                         log::info!("attempting to add {:#?}", entity);
@@ -376,7 +400,7 @@ impl Handler for AppServer {
                     }
                     Command::Rename { from, to } => {
                         if self.entity().await.read().await.role() != authfile::Role::Admin {
-                            // TODO: tell em "you're not an admin lol kekw"
+                            // TODO: write to statusline: you are not an admin
                             return Ok(());
                         }
                         let from = from
@@ -401,8 +425,6 @@ impl Handler for AppServer {
 
                             let ent = ent.read().await.clone();
                             let kd_2_id = self.key_data_to_id.read().await;
-                            // TODO: remove stray ids from key_data_to_id
-                            // and id_to_user
                             let ids = kd_2_id.get(&ent.key_data()).unwrap();
                             for id in ids {
                                 let mut clients = self.clients.write().await;
@@ -422,7 +444,7 @@ impl Handler for AppServer {
                     }
                     Command::Commit => {
                         if self.entity().await.read().await.role() != authfile::Role::Admin {
-                            // TODO: tell em "you're not an admin lol kekw"
+                            // TODO: write to statusline: you are not an admin
                             return Ok(());
                         }
                         let keychain = self.keychain.read().await;
@@ -564,15 +586,21 @@ impl Handler for AppServer {
 
         {
             let mut clients = self.clients.write().await;
-            match clients.get_mut(&self.id).unwrap().terminal.resize(rect) {
-                Ok(_) => {}
-                Err(e) => {
-                    return Err(Error::FrameResize {
-                        source: e,
-                        id: self.id,
-                    });
-                }
+            let Some(client) = clients.get_mut(&self.id) else {
+                log::warn!(
+                    "failed to get handle on the current client with id: {}",
+                    self.id
+                );
+                return Ok(());
             };
+
+            client
+                .terminal
+                .resize(rect)
+                .map_err(|source| Error::FrameResize {
+                    source,
+                    id: self.id,
+                })?;
         }
         self.render().await;
 
