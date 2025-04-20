@@ -233,6 +233,85 @@ impl AppServer {
             }
         });
     }
+
+    async fn run_command(&mut self, command: Command) -> Result<(), Error> {
+        match command {
+            Command::Add(entity) => {
+                log::info!("attempting to add {:#?}", entity);
+                let mut keychain = self.keychain.write().await;
+                let mut key_data_pool = self.key_data_pool.write().await;
+                let mut key_data_to_user = self.key_data_to_user.write().await;
+
+                let key_data = entity.key_data();
+
+                let entity = new_atomic(entity);
+                keychain.push(entity.clone());
+                key_data_pool.insert(key_data.clone());
+                key_data_to_user.insert(key_data, entity);
+            }
+            Command::Rename { from, to } => {
+                let to = authfile::sanitize_name(&to);
+
+                let kc = self.keychain.read().await;
+                for ent in kc.iter() {
+                    if ent.read().await.name() != from {
+                        continue;
+                    }
+
+                    log::info!("renaming {:?} to {:?}", from, to);
+                    ent.write().await.set_name(&to);
+
+                    let ent = ent.read().await.clone();
+                    let kd_2_id = self.key_data_to_id.read().await;
+                    let Some(ids) = kd_2_id.get(&ent.key_data()) else {
+                        log::warn!(
+                            "while updating client display name in textareas: found no client id with the key: {}",
+                            ent.key_data().fingerprint(russh::keys::HashAlg::Sha256)
+                        );
+                        return Ok(());
+                    };
+                    for id in ids {
+                        let mut clients = self.clients.write().await;
+                        let Some(client) = clients.get_mut(id) else {
+                            log::warn!(
+                                "failed to get handle on client with id: {id}, considering them disconnected"
+                            );
+                            continue;
+                        };
+
+                        let block = Block::bordered()
+                            .border_type(BorderType::Rounded)
+                            .title(ent.title());
+                        client.textarea.set_block(block);
+                    }
+                }
+            }
+            Command::Commit => {
+                let keychain = self.keychain.read().await;
+                let mut pubkeys = vec![];
+                for entity in keychain.iter() {
+                    let ent_str = entity.read().await.to_pubkey().to_string();
+                    pubkeys.push(ent_str);
+                }
+                let pubkeys = pubkeys.join("\n");
+                let mut tmpfile = self.args.authfile.clone();
+                tmpfile.push('~');
+                if let Err(e) = std::fs::write(&tmpfile, pubkeys) {
+                    log::error!(
+                        "failed to create temporary file to commit in-memory authorized keys: {e:#?}"
+                    );
+                    return Ok(());
+                };
+                if let Err(e) = std::fs::rename(tmpfile, &self.args.authfile) {
+                    log::error!(
+                        "failed to move temporary file to original authfile: {e:#?}: do we have write permissions to it?"
+                    );
+                    return Ok(());
+                };
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Server for AppServer {
@@ -380,96 +459,11 @@ impl Handler for AppServer {
                     return Ok(());
                 };
 
-                match command {
-                    Command::Add(entity) => {
-                        if self.entity().await.read().await.role() != authfile::Role::Admin {
-                            // TODO: write to statusline: you are not an admin
-                            return Ok(());
-                        }
-                        log::info!("attempting to add {:#?}", entity);
-                        let mut keychain = self.keychain.write().await;
-                        let mut key_data_pool = self.key_data_pool.write().await;
-                        let mut key_data_to_user = self.key_data_to_user.write().await;
-
-                        let key_data = entity.key_data();
-
-                        let entity = new_atomic(entity);
-                        keychain.push(entity.clone());
-                        key_data_pool.insert(key_data.clone());
-                        key_data_to_user.insert(key_data, entity);
-                    }
-                    Command::Rename { from, to } => {
-                        if self.entity().await.read().await.role() != authfile::Role::Admin {
-                            // TODO: write to statusline: you are not an admin
-                            return Ok(());
-                        }
-                        let from = from
-                            .split_once(':')
-                            .map(|(sanitized, _ignore_role)| sanitized.to_string())
-                            .unwrap_or(from);
-
-                        let to = to
-                            .split_once(':')
-                            .map(|(sanitized, _ignore_role)| sanitized.to_string())
-                            .unwrap_or(to);
-
-                        log::info!("renaming {:?} to {:?}", from, to);
-
-                        let kc = self.keychain.read().await;
-                        for ent in kc.iter() {
-                            if ent.read().await.name() != from {
-                                continue;
-                            }
-
-                            ent.write().await.set_name(&to);
-
-                            let ent = ent.read().await.clone();
-                            let kd_2_id = self.key_data_to_id.read().await;
-                            let ids = kd_2_id.get(&ent.key_data()).unwrap();
-                            for id in ids {
-                                let mut clients = self.clients.write().await;
-                                let Some(client) = clients.get_mut(id) else {
-                                    log::warn!(
-                                        "failed to get handle on client with id: {id}, considering them disconnected"
-                                    );
-                                    continue;
-                                };
-
-                                let block = Block::bordered()
-                                    .border_type(BorderType::Rounded)
-                                    .title(ent.title());
-                                client.textarea.set_block(block);
-                            }
-                        }
-                    }
-                    Command::Commit => {
-                        if self.entity().await.read().await.role() != authfile::Role::Admin {
-                            // TODO: write to statusline: you are not an admin
-                            return Ok(());
-                        }
-                        let keychain = self.keychain.read().await;
-                        let mut pubkeys = vec![];
-                        for entity in keychain.iter() {
-                            let ent_str = entity.read().await.to_pubkey().to_string();
-                            pubkeys.push(ent_str);
-                        }
-                        let pubkeys = pubkeys.join("\n");
-                        let mut tmpfile = self.args.authfile.clone();
-                        tmpfile.push('~');
-                        if let Err(e) = std::fs::write(&tmpfile, pubkeys) {
-                            log::error!(
-                                "failed to create temporary file to commit in-memory authorized keys: {e:#?}"
-                            );
-                            return Ok(());
-                        };
-                        if let Err(e) = std::fs::rename(tmpfile, &self.args.authfile) {
-                            log::error!(
-                                "failed to move temporary file to original authfile: {e:#?}: do we have write permissions to it?"
-                            );
-                            return Ok(());
-                        };
-                    }
+                if self.entity().await.read().await.role() != authfile::Role::Admin {
+                    // TODO: write to statusline: you are not an admin
+                    return Ok(());
                 }
+                self.run_command(command).await?;
                 // re-render
                 self.render().await;
             }
@@ -663,6 +657,7 @@ struct Args {
     /// Port to listen on for incoming connections
     #[arg(long, short, default_value = "2222")]
     port: u16,
+
     /// Interface on the host to listen on
     #[arg(long, default_value = "0.0.0.0")]
     host: String,
