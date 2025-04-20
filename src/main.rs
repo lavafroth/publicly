@@ -92,7 +92,7 @@ impl AppServer {
             )?],
             ..Default::default()
         };
-        self.run_on_address(Arc::new(config), ("0.0.0.0", self.args.port))
+        self.run_on_address(Arc::new(config), (self.args.host.clone(), self.args.port))
             .await?;
         Ok(())
     }
@@ -663,6 +663,9 @@ struct Args {
     /// Port to listen on for incoming connections
     #[arg(long, short, default_value = "2222")]
     port: u16,
+    /// Interface on the host to listen on
+    #[arg(long, default_value = "0.0.0.0")]
+    host: String,
 }
 
 #[tokio::main]
