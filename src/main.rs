@@ -9,7 +9,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::termion::event::{Event, Key};
 use ratatui::text::Text;
-use ratatui::widgets::{Block, BorderType, Clear, List};
+use ratatui::widgets::{Block, BorderType, Clear, List, Widget};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use ringbuffer::{AllocRingBuffer, RingBuffer};
 use russh::keys::{PublicKey, ssh_key::public::KeyData, ssh_key::rand_core::OsRng};
@@ -75,6 +75,12 @@ struct AppServer {
     args: Args,
     app: Atomic<App>,
 }
+
+const UI_LAYOUT: [ratatui::layout::Constraint; 3] = [
+    Constraint::Fill(1),   // message history
+    Constraint::Length(4), // input textarea
+    Constraint::Length(1), // statusline
+];
 
 impl AppServer {
     pub async fn run(&mut self) -> Result<(), anyhow::Error> {
@@ -177,7 +183,7 @@ impl AppServer {
 
                     let layout = Layout::default()
                         .direction(Direction::Vertical)
-                        .constraints(vec![Constraint::Fill(1), Constraint::Length(4)])
+                        .constraints(UI_LAYOUT)
                         .split(f.area());
                     let style = Style::default().fg(Color::Green);
 
@@ -197,39 +203,6 @@ impl AppServer {
                         error
                     )
                 }
-            }
-        });
-    }
-
-    // Render textarea only for the client who sent
-    // a keystroke
-    async fn render_textarea(&mut self) {
-        let clients = self.clients.clone();
-        let id = self.id;
-        tokio::spawn(async move {
-            let mut clients = clients.write().await;
-            let Some(client) = clients.get_mut(&id) else {
-                log::warn!("failed to get handle on the current client with id: {}", id);
-                return;
-            };
-
-            let res = client.terminal.draw(|f| {
-                let buf = f.buffer_mut();
-                let area = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints(vec![Constraint::Fill(1), Constraint::Length(4)])
-                    .split(buf.area)[1];
-                for i in 0..(area.width * area.y) as usize {
-                    buf.content[i].set_skip(true);
-                }
-                f.render_widget(&client.textarea, area);
-            });
-            if let Err(error) = res {
-                log::error!(
-                    "failed to render textarea for user: client {}: {:#?}",
-                    client.channel,
-                    error
-                )
             }
         });
     }
@@ -335,7 +308,6 @@ impl Handler for AppServer {
         session: &mut Session,
     ) -> Result<bool, Self::Error> {
         {
-            // let entity = self.entity().await;
             let channel = channel.id();
             let handle = session.handle();
             let terminal_handle = TerminalHandle::start(handle.clone(), channel).await;
@@ -361,16 +333,14 @@ impl Handler for AppServer {
                     .title(self.entity().await.read().await.title()),
             );
 
-            let mut clients = self.clients.write().await;
-            clients.insert(
-                self.id,
-                Client {
-                    textarea,
-                    channel,
-                    handle,
-                    terminal,
-                },
-            );
+            let client = Client {
+                textarea,
+                channel,
+                handle,
+                terminal,
+            };
+
+            self.clients.write().await.insert(self.id, client);
         }
         self.announce().await;
         Ok(true)
@@ -480,7 +450,7 @@ impl Handler for AppServer {
                     };
                     client.textarea.input(Event::Key(Key::Char('\n')));
                 }
-                self.render_textarea().await;
+                self.render().await;
             }
             data if !data.is_empty() => {
                 let mut iterator = data.iter().map(|d| Ok(*d));
@@ -510,7 +480,7 @@ impl Handler for AppServer {
                         }
                     }
                 }
-                self.render_textarea().await;
+                self.render().await;
             }
             _ => {}
         }
