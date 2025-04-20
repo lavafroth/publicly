@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -33,10 +34,51 @@ fn new_atomic<T>(object: T) -> Atomic<T> {
 
 type Atomic<T> = Arc<RwLock<T>>;
 
+#[derive(Clone)]
+enum Announcement {
+    Joined,
+    Left,
+}
+
+#[derive(Clone)]
+enum Message {
+    Announce {
+        action: Announcement,
+        entity: Entity,
+    },
+    Plain(String),
+}
+
+impl Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Message::Announce { action, entity } => match action {
+                Announcement::Joined => {
+                    write!(
+                        f,
+                        "{} has joined the chat with {} privileges",
+                        entity.name(),
+                        entity.role()
+                    )
+                }
+                Announcement::Left => {
+                    write!(
+                        f,
+                        "{} with {} privileges has left the chat",
+                        entity.name(),
+                        entity.role()
+                    )
+                }
+            },
+            Message::Plain(s) => write!(f, "{s}"),
+        }
+    }
+}
+
 /// App contains data strictly related to the chat.
 /// It is not responsible for authorization.
 struct App {
-    pub history: AllocRingBuffer<String>,
+    pub history: AllocRingBuffer<Message>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -162,19 +204,19 @@ impl AppServer {
         self.id_to_user.read().await[&self.id].clone()
     }
 
-    async fn announce(&mut self) {
+    async fn announce(&mut self, action: Announcement) {
         let entity = self.entity().await;
         let entity = entity.read().await;
-        self.app.write().await.history.push(format!(
-            "{} with {:?} privileges has joined",
-            entity.name(),
-            entity.role()
-        ));
+        let message = Message::Announce {
+            action,
+            entity: entity.clone(),
+        };
+        self.app.write().await.history.push(message);
     }
 
     async fn render(&mut self) {
         let clients = self.clients.clone();
-        let history: Vec<String> = self.app.read().await.history.to_vec();
+        let history: Vec<Message> = self.app.read().await.history.to_vec();
         tokio::spawn(async move {
             for (_, client) in clients.write().await.iter_mut() {
                 let res = client.terminal.draw(|f| {
@@ -189,7 +231,10 @@ impl AppServer {
 
                     let paragraphs: Vec<_> = history
                         .iter()
-                        .map(|message| Text::styled(message.to_string(), style))
+                        .map(|message| match message {
+                            Message::Announce { .. } => Text::styled(message.to_string(), style),
+                            Message::Plain(_) => Text::raw(message.to_string()),
+                        })
                         .collect();
 
                     let paragraphs = List::new(paragraphs);
@@ -342,7 +387,7 @@ impl Handler for AppServer {
 
             self.clients.write().await.insert(self.id, client);
         }
-        self.announce().await;
+        self.announce(Announcement::Joined).await;
         Ok(true)
     }
 
@@ -374,21 +419,25 @@ impl Handler for AppServer {
         match data {
             // Sending Ctrl+C ends the session and disconnects the client
             [3] => {
-                let mut key_data_to_id = self.key_data_to_id.write().await;
-                let mut id_to_user = self.id_to_user.write().await;
+                self.announce(Announcement::Left).await;
+                self.render().await;
+                {
+                    let mut key_data_to_id = self.key_data_to_id.write().await;
+                    let mut id_to_user = self.id_to_user.write().await;
 
-                let Some(entity) = id_to_user.get(&self.id) else {
-                    log::warn!(
-                        "could not look up the entity corresponding to the current id: {}",
-                        self.id
-                    );
-                    return Err(russh::Error::Disconnect.into());
-                };
-                let stray_kd = entity.read().await.key_data();
-                key_data_to_id.remove(&stray_kd);
+                    let Some(entity) = id_to_user.get(&self.id) else {
+                        log::warn!(
+                            "could not look up the entity corresponding to the current id: {}",
+                            self.id
+                        );
+                        return Err(russh::Error::Disconnect.into());
+                    };
+                    let stray_kd = entity.read().await.key_data();
+                    key_data_to_id.remove(&stray_kd);
 
-                id_to_user.remove(&self.id);
-                self.clients.write().await.remove(&self.id);
+                    id_to_user.remove(&self.id);
+                    self.clients.write().await.remove(&self.id);
+                }
                 return Err(russh::Error::Disconnect.into());
             }
             // Press Return to send a message
@@ -424,7 +473,7 @@ impl Handler for AppServer {
                 };
                 let Some(command) = maybe_command else {
                     let message = format!("[{name}]: {text}");
-                    self.app.write().await.history.push(message);
+                    self.app.write().await.history.push(Message::Plain(message));
                     self.render().await;
                     return Ok(());
                 };
