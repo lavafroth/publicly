@@ -6,11 +6,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 use ratatui::backend::TermionBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::termion::event::{Event, Key};
 use ratatui::text::Text;
-use ratatui::widgets::{Block, BorderType, Clear, List, Widget};
+use ratatui::widgets::{Block, BorderType, List};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use ringbuffer::{AllocRingBuffer, RingBuffer};
 use russh::keys::{PublicKey, ssh_key::public::KeyData, ssh_key::rand_core::OsRng};
@@ -21,6 +21,7 @@ use tui_textarea::TextArea;
 
 mod authfile;
 mod terminal_handle;
+mod ui;
 use authfile::Entity;
 use terminal_handle::TerminalHandle;
 
@@ -117,12 +118,6 @@ struct AppServer {
     args: Args,
     app: Atomic<App>,
 }
-
-const UI_LAYOUT: [ratatui::layout::Constraint; 3] = [
-    Constraint::Fill(1),   // message history
-    Constraint::Length(4), // input textarea
-    Constraint::Length(1), // statusline
-];
 
 impl AppServer {
     pub async fn run(&mut self) -> Result<(), anyhow::Error> {
@@ -221,12 +216,7 @@ impl AppServer {
             for (_, client) in clients.write().await.iter_mut() {
                 let res = client.terminal.draw(|f| {
                     // clear the screen
-                    f.render_widget(Clear, f.area());
-
-                    let layout = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints(UI_LAYOUT)
-                        .split(f.area());
+                    let layout = ui::layout(f);
                     let style = Style::default().fg(Color::Green);
 
                     let paragraphs: Vec<_> = history
