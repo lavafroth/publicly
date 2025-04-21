@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -95,6 +96,8 @@ pub enum Error {
     CommandParse(String),
     #[error("unable to spawn a terminal for client {id}")]
     TerminalSessionSpawn { source: std::io::Error, id: usize },
+    #[error("failed to parse entity lookup: {0}")]
+    EntityLookup(String),
 }
 
 pub struct Client {
@@ -313,6 +316,48 @@ impl AppServer {
                     );
                     return Ok(());
                 };
+            }
+            Command::Info(entity_lookup) => {
+                let keychain = self.keychain.read().await;
+                let mut maybe_found_entity = None;
+                for entity in keychain.iter() {
+                    match entity_lookup {
+                        EntityLookup::Name(ref name) => {
+                            if entity.name().await.eq(name.as_str()) {
+                                maybe_found_entity.replace(entity);
+                                break;
+                            }
+                        }
+                        EntityLookup::Sha256(ref digest) => {
+                            if entity
+                                .key_data()
+                                .fingerprint(russh::keys::HashAlg::Sha256)
+                                .to_string()
+                                .eq(digest.as_str())
+                            {
+                                maybe_found_entity.replace(entity);
+                                break;
+                            }
+                        }
+                    }
+                }
+                // wow so much to query a user huh? anyways
+                let Some(entity) = maybe_found_entity else {
+                    return Ok(());
+                };
+
+                let dossier = format!(
+                    "
+name: {}
+role: {}
+fingerprint: {}
+",
+                    entity.name().await,
+                    entity.role().await,
+                    entity.key_data().fingerprint(russh::keys::HashAlg::Sha256)
+                );
+
+                self.app.write().await.history.push(Message::Plain(dossier));
             }
         }
         Ok(())
@@ -619,10 +664,31 @@ impl Drop for AppServer {
     }
 }
 
+pub enum EntityLookup {
+    Name(String),
+    Sha256(String),
+}
+
+impl FromStr for EntityLookup {
+    type Err = Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let lookup = match s.split_once(':') {
+            Some(("SHA256", digest)) if !digest.contains(':') => {
+                EntityLookup::Sha256(s.to_string())
+            }
+            None => EntityLookup::Name(s.to_string()),
+            _ => return Err(Error::EntityLookup(s.to_string())),
+        };
+        Ok(lookup)
+    }
+}
+
 pub enum Command {
     Add(Entity),
     Rename { from: String, to: String },
     Commit,
+    Info(EntityLookup),
 }
 
 impl Command {
@@ -644,6 +710,7 @@ impl Command {
                     _ => return Err(Error::CommandParse(text.to_string())),
                 }
             }
+            Some(("/info", payload)) => Self::Info(payload.parse()?),
             _ => return Ok(None),
         }))
     }
