@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::fmt::Display;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -22,7 +21,7 @@ use tui_textarea::TextArea;
 mod authfile;
 mod terminal_handle;
 mod ui;
-use authfile::Entity;
+use authfile::{ArcPersona, Entity};
 use terminal_handle::TerminalHandle;
 
 type SshTerminal = Terminal<TermionBackend<TerminalHandle>>;
@@ -45,33 +44,33 @@ enum Announcement {
 enum Message {
     Announce {
         action: Announcement,
-        entity: Entity,
+        persona: ArcPersona,
     },
     Plain(String),
 }
 
-impl Display for Message {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Message {
+    pub async fn text_content(&self) -> String {
         match self {
-            Message::Announce { action, entity } => match action {
+            Message::Announce { action, persona } => match action {
                 Announcement::Joined => {
-                    write!(
-                        f,
+                    let persona = persona.read().await;
+                    format!(
                         "{} has joined the chat with {} privileges",
-                        entity.name(),
-                        entity.role()
+                        persona.name(),
+                        persona.role()
                     )
                 }
                 Announcement::Left => {
-                    write!(
-                        f,
+                    let persona = persona.read().await;
+                    format!(
                         "{} with {} privileges has left the chat",
-                        entity.name(),
-                        entity.role()
+                        persona.name(),
+                        persona.role()
                     )
                 }
             },
-            Message::Plain(s) => write!(f, "{s}"),
+            Message::Plain(s) => s.to_string(),
         }
     }
 }
@@ -107,11 +106,11 @@ pub struct Client {
 
 #[derive(Clone)]
 struct AppServer {
-    keychain: Atomic<Vec<Atomic<Entity>>>,
+    keychain: Atomic<Vec<Arc<Entity>>>,
     key_data_pool: Atomic<HashSet<KeyData>>,
-    key_data_to_user: Atomic<HashMap<KeyData, Atomic<Entity>>>,
+    key_data_to_user: Atomic<HashMap<KeyData, Arc<Entity>>>,
     key_data_to_id: Atomic<HashMap<KeyData, Vec<usize>>>,
-    id_to_user: Atomic<HashMap<usize, Atomic<Entity>>>,
+    id_to_user: Atomic<HashMap<usize, Arc<Entity>>>,
     clients: Atomic<HashMap<usize, Client>>,
 
     id: usize,
@@ -141,7 +140,7 @@ impl AppServer {
     }
 
     async fn check_role_and_reload(&mut self) -> Result<(), Error> {
-        if self.entity().await.read().await.role() == authfile::Role::Admin {
+        if self.entity().await.role().await == authfile::Role::Admin {
             self.reload().await?;
         } else {
             // TODO: write a helpful message to the bottom most statusline
@@ -184,7 +183,7 @@ impl AppServer {
             let mut new_key_data_to_user = HashMap::new();
 
             for entity in new_keychain.entities.iter() {
-                new_key_data_to_user.insert(entity.read().await.key_data(), entity.clone());
+                new_key_data_to_user.insert(entity.key_data(), entity.clone());
             }
 
             *key_data_to_user = new_key_data_to_user;
@@ -195,40 +194,37 @@ impl AppServer {
         Ok(())
     }
 
-    async fn entity(&mut self) -> Atomic<Entity> {
+    async fn entity(&mut self) -> Arc<Entity> {
         self.id_to_user.read().await[&self.id].clone()
     }
 
     async fn announce(&mut self, action: Announcement) {
-        let entity = self.entity().await;
-        let entity = entity.read().await;
-        let message = Message::Announce {
-            action,
-            entity: entity.clone(),
-        };
+        let persona = self.entity().await.persona();
+        let message = Message::Announce { action, persona };
         self.app.write().await.history.push(message);
     }
 
     async fn render(&mut self) {
         let clients = self.clients.clone();
         let history: Vec<Message> = self.app.read().await.history.to_vec();
+
         tokio::spawn(async move {
+            let mut paragraphs = Vec::with_capacity(history.len());
+            for message in history {
+                let style = Style::default().fg(Color::Green);
+                let text_content = match message {
+                    Message::Announce { .. } => Text::styled(message.text_content().await, style),
+                    Message::Plain(_) => Text::raw(message.text_content().await),
+                };
+                paragraphs.push(text_content);
+            }
+            let paragraphs = List::new(paragraphs);
             for (_, client) in clients.write().await.iter_mut() {
                 let res = client.terminal.draw(|f| {
                     // clear the screen
                     let layout = ui::layout(f);
-                    let style = Style::default().fg(Color::Green);
 
-                    let paragraphs: Vec<_> = history
-                        .iter()
-                        .map(|message| match message {
-                            Message::Announce { .. } => Text::styled(message.to_string(), style),
-                            Message::Plain(_) => Text::raw(message.to_string()),
-                        })
-                        .collect();
-
-                    let paragraphs = List::new(paragraphs);
-                    f.render_widget(paragraphs, layout[0]);
+                    f.render_widget(paragraphs.clone(), layout[0]);
                     f.render_widget(&client.textarea, layout[1]);
                 });
                 if let Err(error) = res {
@@ -252,7 +248,7 @@ impl AppServer {
 
                 let key_data = entity.key_data();
 
-                let entity = new_atomic(entity);
+                let entity = Arc::new(entity);
                 keychain.push(entity.clone());
                 key_data_pool.insert(key_data.clone());
                 key_data_to_user.insert(key_data, entity);
@@ -262,19 +258,19 @@ impl AppServer {
 
                 let kc = self.keychain.read().await;
                 for ent in kc.iter() {
-                    if ent.read().await.name() != from {
+                    if ent.name().await != from {
                         continue;
                     }
 
                     log::info!("renaming {:?} to {:?}", from, to);
-                    ent.write().await.set_name(&to);
+                    ent.set_name(&to).await;
 
-                    let ent = ent.read().await.clone();
+                    let entity = ent.clone();
                     let kd_2_id = self.key_data_to_id.read().await;
-                    let Some(ids) = kd_2_id.get(&ent.key_data()) else {
+                    let Some(ids) = kd_2_id.get(&entity.key_data()) else {
                         log::warn!(
                             "while updating client display name in textareas: found no client id with the key: {}",
-                            ent.key_data().fingerprint(russh::keys::HashAlg::Sha256)
+                            entity.key_data().fingerprint(russh::keys::HashAlg::Sha256)
                         );
                         return Ok(());
                     };
@@ -287,9 +283,10 @@ impl AppServer {
                             continue;
                         };
 
+                        let title = entity.title().await;
                         let block = Block::bordered()
                             .border_type(BorderType::Rounded)
-                            .title(ent.title());
+                            .title(title);
                         client.textarea.set_block(block);
                     }
                 }
@@ -298,7 +295,7 @@ impl AppServer {
                 let keychain = self.keychain.read().await;
                 let mut pubkeys = vec![];
                 for entity in keychain.iter() {
-                    let ent_str = entity.read().await.to_pubkey().to_string();
+                    let ent_str = entity.to_pubkey().await.to_string();
                     pubkeys.push(ent_str);
                 }
                 let pubkeys = pubkeys.join("\n");
@@ -362,11 +359,11 @@ impl Handler for AppServer {
             })?;
 
             let mut textarea = TextArea::default();
-            textarea.set_block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .title(self.entity().await.read().await.title()),
-            );
+            let title = self.entity().await.title().await;
+            let surrounding_block = Block::bordered()
+                .border_type(BorderType::Rounded)
+                .title(title);
+            textarea.set_block(surrounding_block);
 
             let client = Client {
                 textarea,
@@ -422,8 +419,8 @@ impl Handler for AppServer {
                         );
                         return Err(russh::Error::Disconnect.into());
                     };
-                    let stray_kd = entity.read().await.key_data();
-                    key_data_to_id.remove(&stray_kd);
+                    let stray_key_data = entity.key_data();
+                    key_data_to_id.remove(&stray_key_data);
 
                     id_to_user.remove(&self.id);
                     self.clients.write().await.remove(&self.id);
@@ -452,7 +449,7 @@ impl Handler for AppServer {
                         ));
                     text
                 };
-                let name = self.entity().await.read().await.name().to_string();
+                let name = self.entity().await.name().await;
 
                 let maybe_command = match Command::parse(&text) {
                     Ok(c) => c,
@@ -468,7 +465,7 @@ impl Handler for AppServer {
                     return Ok(());
                 };
 
-                if self.entity().await.read().await.role() != authfile::Role::Admin {
+                if self.entity().await.role().await != authfile::Role::Admin {
                     // TODO: write to statusline: you are not an admin
                     return Ok(());
                 }
@@ -688,7 +685,7 @@ async fn main() -> Result<()> {
 
     let mut raw_key_data_to_user = HashMap::new();
     for entity in keychain.entities.iter() {
-        raw_key_data_to_user.insert(entity.read().await.key_data(), entity.clone());
+        raw_key_data_to_user.insert(entity.key_data(), entity.clone());
     }
 
     let key_data_to_user = new_atomic(raw_key_data_to_user);

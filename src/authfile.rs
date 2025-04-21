@@ -31,10 +31,7 @@ pub async fn read(path: &Path) -> Result<AuthFile, Error> {
         entities.push(entity);
     }
     let key_pool = build_key_data_pool(&entities);
-    let entities = entities
-        .into_iter()
-        .map(|entity| Arc::new(RwLock::new(entity)))
-        .collect();
+    let entities = entities.into_iter().map(Arc::new).collect();
     Ok(AuthFile { entities, key_pool })
 }
 
@@ -53,11 +50,12 @@ impl TryFrom<&str> for Entity {
             }
         };
 
-        Ok(Entity {
+        let persona = Persona {
             name: sanitize_name(name),
             role,
-            key,
-        })
+        };
+        let persona = Arc::new(RwLock::new(persona));
+        Ok(Entity { persona, key })
     }
 }
 
@@ -66,30 +64,57 @@ fn build_key_data_pool(entities: &[Entity]) -> HashSet<KeyData> {
 }
 
 pub struct AuthFile {
-    pub entities: Vec<Arc<RwLock<Entity>>>,
+    pub entities: Vec<Arc<Entity>>,
     pub key_pool: HashSet<KeyData>,
 }
 
 #[derive(Clone, Debug)]
-pub struct Entity {
+pub struct Persona {
     name: String,
     role: Role,
+}
+
+impl Persona {
+    pub fn title(&self) -> String {
+        format!("[{} {}]", self.name, self.role)
+    }
+
+    pub fn name(&self) -> String {
+        self.name.to_owned()
+    }
+
+    pub fn role(&self) -> Role {
+        self.role
+    }
+}
+
+pub type ArcPersona = Arc<RwLock<Persona>>;
+
+#[derive(Clone, Debug)]
+pub struct Entity {
+    // Requires interior mutability for changing name and role
+    persona: ArcPersona,
+    // The public key does not change for an entity over
+    // the lifetime of the app
     key: PublicKey,
 }
 
 impl Entity {
-    pub fn set_role(&mut self, role: Role) {
-        self.role = role;
+    /// NOTE: interior mutation on persona
+    pub async fn set_role(&mut self, role: Role) {
+        self.persona.write().await.role = role;
     }
 
-    pub fn set_name(&mut self, name: &str) {
-        self.name = name.to_string();
+    /// NOTE: interior mutation on persona
+    pub async fn set_name(&self, name: &str) {
+        self.persona.write().await.name = name.to_string();
     }
 
-    pub fn to_pubkey(&self) -> PublicKey {
+    pub async fn to_pubkey(&self) -> PublicKey {
         let mut original_key = self.key.clone();
-        let name = &self.name;
-        let role = if self.role == Role::Admin {
+        let persona = self.persona.read().await;
+        let name = &persona.name;
+        let role = if persona.role == Role::Admin {
             ":admin"
         } else {
             ""
@@ -98,19 +123,23 @@ impl Entity {
         original_key
     }
 
-    pub fn name(&self) -> &str {
-        &self.name
+    pub async fn name(&self) -> String {
+        self.persona.read().await.name.to_string()
     }
-    pub fn role(&self) -> Role {
-        self.role
+    pub async fn role(&self) -> Role {
+        self.persona.read().await.role
     }
 
-    pub fn title(&self) -> String {
-        format!("[{} {}]", self.name(), self.role())
+    pub async fn title(&self) -> String {
+        self.persona.read().await.title()
     }
 
     pub fn key_data(&self) -> KeyData {
         self.key.key_data().clone()
+    }
+
+    pub fn persona(&self) -> Arc<RwLock<Persona>> {
+        self.persona.clone()
     }
 }
 
