@@ -283,7 +283,7 @@ impl AppServer {
                     let Some(ids) = kd_2_id.get(&entity.key_data()) else {
                         log::warn!(
                             "while updating client display name in textareas: found no client id with the key: {}",
-                            entity.key_data().fingerprint(russh::keys::HashAlg::Sha256)
+                            entity.fingerprint()
                         );
                         return Ok(());
                     };
@@ -335,24 +335,9 @@ impl AppServer {
                 let keychain = self.keychain.read().await;
                 let mut maybe_found_entity = None;
                 for entity in keychain.iter() {
-                    match entity_lookup {
-                        EntityLookup::Name(ref name) => {
-                            if entity.name().await.eq(name.as_str()) {
-                                maybe_found_entity.replace(entity);
-                                break;
-                            }
-                        }
-                        EntityLookup::Sha256(ref digest) => {
-                            if entity
-                                .key_data()
-                                .fingerprint(russh::keys::HashAlg::Sha256)
-                                .to_string()
-                                .eq(digest.as_str())
-                            {
-                                maybe_found_entity.replace(entity);
-                                break;
-                            }
-                        }
+                    if entity_lookup.matches(entity).await {
+                        maybe_found_entity.replace(entity);
+                        break;
                     }
                 }
                 // wow so much to query a user huh? anyways
@@ -369,7 +354,7 @@ fingerprint: {}
 ",
                     entity.name().await,
                     entity.role().await,
-                    entity.key_data().fingerprint(russh::keys::HashAlg::Sha256)
+                    entity.fingerprint()
                 );
 
                 self.app.write().await.history.push(Message::Plain(dossier));
@@ -709,6 +694,25 @@ impl FromStr for EntityLookup {
             _ => return Err(Error::EntityLookup(s.to_string())),
         };
         Ok(lookup)
+    }
+}
+
+impl EntityLookup {
+    pub async fn matches<T: AsRef<Entity>>(&self, entity: T) -> bool {
+        let entity = entity.as_ref();
+        match self {
+            EntityLookup::Name(name) => {
+                if entity.name().await.eq(name.as_str()) {
+                    return true;
+                }
+            }
+            EntityLookup::Sha256(digest) => {
+                if entity.fingerprint().eq(digest.as_str()) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 

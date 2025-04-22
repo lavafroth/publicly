@@ -138,6 +138,12 @@ impl Entity {
         self.key.key_data().clone()
     }
 
+    pub fn fingerprint(&self) -> String {
+        self.key
+            .fingerprint(russh::keys::HashAlg::Sha256)
+            .to_string()
+    }
+
     pub fn persona(&self) -> Arc<RwLock<Persona>> {
         self.persona.clone()
     }
