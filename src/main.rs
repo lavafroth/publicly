@@ -98,6 +98,8 @@ pub enum Error {
     TerminalSessionSpawn { source: std::io::Error, id: usize },
     #[error("failed to parse entity lookup: {0}")]
     EntityLookup(String),
+    #[error("user {0:?} is not an admin")]
+    NotAnAdmin(String),
 }
 
 pub struct Client {
@@ -144,12 +146,10 @@ impl AppServer {
     }
 
     async fn check_role_and_reload(&mut self) -> Result<(), Error> {
-        if self.entity().await.role().await == authfile::Role::Admin {
-            self.reload().await?;
-        } else {
-            // TODO: write a helpful message to the bottom most statusline
+        if self.entity().await.role().await != authfile::Role::Admin {
+            return Err(Error::NotAnAdmin(self.entity().await.name().await));
         }
-        Ok(())
+        self.reload().await
     }
 
     async fn reload(&mut self) -> Result<(), Error> {
@@ -198,7 +198,7 @@ impl AppServer {
         Ok(())
     }
 
-    async fn entity(&mut self) -> Arc<Entity> {
+    async fn entity(&self) -> Arc<Entity> {
         self.id_to_user.read().await[&self.id].clone()
     }
 
@@ -208,7 +208,7 @@ impl AppServer {
         self.app.write().await.history.push(message);
     }
 
-    async fn render(&mut self) {
+    async fn render(&self) {
         let clients = self.clients.clone();
         let history: Vec<Message> = self.app.read().await.history.to_vec();
 
@@ -243,13 +243,9 @@ impl AppServer {
         });
     }
 
-    async fn run_command(&mut self, command: Command) -> Result<(), Error> {
+    async fn run_command(&self, command: Command) -> Result<(), Error> {
         match command {
             Command::Add(entity) => {
-                if self.entity().await.role().await != authfile::Role::Admin {
-                    // TODO: write to statusline: you are not an admin
-                    return Ok(());
-                }
                 log::info!("attempting to add {:#?}", entity);
                 let mut keychain = self.keychain.write().await;
                 let mut key_data_pool = self.key_data_pool.write().await;
@@ -263,52 +259,48 @@ impl AppServer {
                 key_data_to_user.insert(key_data, entity);
             }
             Command::Rename { from, to } => {
-                if self.entity().await.role().await != authfile::Role::Admin {
-                    // TODO: write to statusline: you are not an admin
-                    return Ok(());
-                }
                 let to = authfile::sanitize_name(&to);
 
-                let kc = self.keychain.read().await;
-                for ent in kc.iter() {
+                for ent in self.keychain.read().await.iter() {
                     if ent.name().await != from {
                         continue;
                     }
 
-                    log::info!("renaming {:?} to {:?}", from, to);
                     ent.set_name(&to).await;
 
-                    let entity = ent.clone();
-                    let kd_2_id = self.key_data_to_id.read().await;
-                    let Some(ids) = kd_2_id.get(&entity.key_data()) else {
+                    let Some(ids) = self
+                        .key_data_to_id
+                        .read()
+                        .await
+                        .get(&ent.key_data())
+                        .cloned()
+                    else {
                         log::warn!(
                             "while updating client display name in textareas: found no client id with the key: {}",
-                            entity.fingerprint()
+                            ent.fingerprint()
                         );
                         return Ok(());
                     };
+
+                    let title = ent.title().await;
+                    let block = Block::bordered()
+                        .border_type(BorderType::Rounded)
+                        .title(title);
+
+                    let mut clients = self.clients.write().await;
+
                     for id in ids {
-                        let mut clients = self.clients.write().await;
-                        let Some(client) = clients.get_mut(id) else {
+                        let Some(client) = clients.get_mut(&id) else {
                             log::warn!(
                                 "failed to get handle on client with id: {id}, considering them disconnected"
                             );
                             continue;
                         };
-
-                        let title = entity.title().await;
-                        let block = Block::bordered()
-                            .border_type(BorderType::Rounded)
-                            .title(title);
-                        client.textarea.set_block(block);
+                        client.textarea.set_block(block.clone());
                     }
                 }
             }
             Command::Commit => {
-                if self.entity().await.role().await != authfile::Role::Admin {
-                    // TODO: write to statusline: you are not an admin
-                    return Ok(());
-                }
                 let keychain = self.keychain.read().await;
                 let mut pubkeys = vec![];
                 for entity in keychain.iter() {
@@ -363,7 +355,7 @@ fingerprint: {}
         Ok(())
     }
 
-    async fn handle_message(&mut self) -> Result<(), <AppServer as Handler>::Error> {
+    async fn handle_message(&mut self) -> Result<(), Error> {
         let text = {
             let mut clients = self.clients.write().await;
             let Some(current_client) = clients.get_mut(&self.id) else {
@@ -382,8 +374,9 @@ fingerprint: {}
                 .input(ratatui::termion::event::Event::Key(Key::Delete));
             text
         };
+        let role = self.entity().await.role().await;
         let name = self.entity().await.name().await;
-        let maybe_command = match Command::parse(&text) {
+        let maybe_command = match Command::parse(&text, role, name.to_string()) {
             Ok(c) => c,
             Err(e) => {
                 let mut clients = self.clients.write().await;
@@ -405,7 +398,18 @@ fingerprint: {}
             self.render().await;
             return Ok(());
         };
-        self.run_command(command).await?;
+        if let Err(e) = self.run_command(command).await {
+            let mut clients = self.clients.write().await;
+            let Some(current_client) = clients.get_mut(&self.id) else {
+                log::warn!(
+                    "failed to get handle on the current client with id: {}",
+                    self.id
+                );
+                return Ok(());
+            };
+            current_client.statusline = e.to_string();
+            return Ok(());
+        }
         Ok(())
     }
 }
@@ -724,15 +728,24 @@ pub enum Command {
 }
 
 impl Command {
-    fn parse(text: &str) -> Result<Option<Self>, Error> {
-        let split = text.split_once(char::is_whitespace);
+    fn parse(text: &str, role: authfile::Role, name: String) -> Result<Option<Self>, Error> {
         if text == "/commit" {
             return Ok(Some(Self::Commit));
         }
 
+        let split = text.split_once(char::is_whitespace);
+        let is_admin = role == authfile::Role::Admin;
         Ok(Some(match split {
-            Some(("/add", payload)) => Self::Add(payload.try_into()?),
+            Some(("/add", payload)) => {
+                if !is_admin {
+                    return Err(Error::NotAnAdmin(name));
+                }
+                Self::Add(payload.try_into()?)
+            }
             Some(("/rename", payload)) => {
+                if !is_admin {
+                    return Err(Error::NotAnAdmin(name));
+                }
                 let split_payload: Vec<&str> = payload.split_whitespace().collect();
                 match split_payload.as_slice() {
                     [from, to] => Self::Rename {
