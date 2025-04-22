@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -20,9 +19,11 @@ use tokio::sync::RwLock;
 use tui_textarea::TextArea;
 
 mod authfile;
+mod entity;
+mod lookup;
 mod terminal_handle;
 mod ui;
-use authfile::{ArcPersona, Entity};
+use entity::{ArcPersona, Entity};
 use terminal_handle::TerminalHandle;
 
 type SshTerminal = Terminal<TermionBackend<TerminalHandle>>;
@@ -100,6 +101,8 @@ pub enum Error {
     EntityLookup(String),
     #[error("user {0:?} is not an admin")]
     NotAnAdmin(String),
+    #[error("failed to parse SSH key string to an entity")]
+    EntityParsing(#[from] entity::Error),
 }
 
 pub struct Client {
@@ -146,7 +149,7 @@ impl AppServer {
     }
 
     async fn check_role_and_reload(&mut self) -> Result<(), Error> {
-        if self.entity().await.role().await != authfile::Role::Admin {
+        if self.entity().await.role().await != entity::Role::Admin {
             return Err(Error::NotAnAdmin(self.entity().await.name().await));
         }
         self.reload().await
@@ -259,8 +262,6 @@ impl AppServer {
                 key_data_to_user.insert(key_data, entity);
             }
             Command::Rename { from, to } => {
-                let to = authfile::sanitize_name(&to);
-
                 for ent in self.keychain.read().await.iter() {
                     if ent.name().await != from {
                         continue;
@@ -681,66 +682,27 @@ impl Drop for AppServer {
     }
 }
 
-pub enum EntityLookup {
-    Name(String),
-    Sha256(String),
-}
-
-impl FromStr for EntityLookup {
-    type Err = Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        let lookup = match s.split_once(':') {
-            Some(("SHA256", digest)) if !digest.is_empty() && !digest.contains(':') => {
-                EntityLookup::Sha256(s.to_string())
-            }
-            None => EntityLookup::Name(s.to_string()),
-            _ => return Err(Error::EntityLookup(s.to_string())),
-        };
-        Ok(lookup)
-    }
-}
-
-impl EntityLookup {
-    pub async fn matches<T: AsRef<Entity>>(&self, entity: T) -> bool {
-        let entity = entity.as_ref();
-        match self {
-            EntityLookup::Name(name) => {
-                if entity.name().await.eq(name.as_str()) {
-                    return true;
-                }
-            }
-            EntityLookup::Sha256(digest) => {
-                if entity.fingerprint().eq(digest.as_str()) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-}
-
 pub enum Command {
     Add(Entity),
     Rename { from: String, to: String },
     Commit,
-    Info(EntityLookup),
+    Info(lookup::EntityLookup),
 }
 
 impl Command {
-    fn parse(text: &str, role: authfile::Role, name: String) -> Result<Option<Self>, Error> {
+    fn parse(text: &str, role: entity::Role, name: String) -> Result<Option<Self>, Error> {
         if text == "/commit" {
             return Ok(Some(Self::Commit));
         }
 
         let split = text.split_once(char::is_whitespace);
-        let is_admin = role == authfile::Role::Admin;
+        let is_admin = role == entity::Role::Admin;
         Ok(Some(match split {
             Some(("/add", payload)) => {
                 if !is_admin {
                     return Err(Error::NotAnAdmin(name));
                 }
-                Self::Add(payload.try_into()?)
+                Self::Add(payload.parse()?)
             }
             Some(("/rename", payload)) => {
                 if !is_admin {
