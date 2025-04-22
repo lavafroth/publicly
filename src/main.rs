@@ -105,6 +105,7 @@ pub struct Client {
     handle: Handle,
     terminal: SshTerminal,
     textarea: TextArea<'static>,
+    statusline: String,
 }
 
 #[derive(Clone)]
@@ -229,6 +230,7 @@ impl AppServer {
 
                     f.render_widget(paragraphs.clone(), layout[0]);
                     f.render_widget(&client.textarea, layout[1]);
+                    f.render_widget(&client.statusline, layout[2]);
                 });
                 if let Err(error) = res {
                     log::error!(
@@ -244,6 +246,10 @@ impl AppServer {
     async fn run_command(&mut self, command: Command) -> Result<(), Error> {
         match command {
             Command::Add(entity) => {
+                if self.entity().await.role().await != authfile::Role::Admin {
+                    // TODO: write to statusline: you are not an admin
+                    return Ok(());
+                }
                 log::info!("attempting to add {:#?}", entity);
                 let mut keychain = self.keychain.write().await;
                 let mut key_data_pool = self.key_data_pool.write().await;
@@ -257,6 +263,10 @@ impl AppServer {
                 key_data_to_user.insert(key_data, entity);
             }
             Command::Rename { from, to } => {
+                if self.entity().await.role().await != authfile::Role::Admin {
+                    // TODO: write to statusline: you are not an admin
+                    return Ok(());
+                }
                 let to = authfile::sanitize_name(&to);
 
                 let kc = self.keychain.read().await;
@@ -295,6 +305,10 @@ impl AppServer {
                 }
             }
             Command::Commit => {
+                if self.entity().await.role().await != authfile::Role::Admin {
+                    // TODO: write to statusline: you are not an admin
+                    return Ok(());
+                }
                 let keychain = self.keychain.read().await;
                 let mut pubkeys = vec![];
                 for entity in keychain.iter() {
@@ -351,6 +365,7 @@ impl AppServer {
 name: {}
 role: {}
 fingerprint: {}
+
 ",
                     entity.name().await,
                     entity.role().await,
@@ -360,6 +375,52 @@ fingerprint: {}
                 self.app.write().await.history.push(Message::Plain(dossier));
             }
         }
+        Ok(())
+    }
+
+    async fn handle_message(&mut self) -> Result<(), <AppServer as Handler>::Error> {
+        let text = {
+            let mut clients = self.clients.write().await;
+            let Some(current_client) = clients.get_mut(&self.id) else {
+                log::warn!(
+                    "failed to get handle on the current client with id: {}",
+                    self.id
+                );
+                return Ok(());
+            };
+            let text = current_client.textarea.lines().join("\n");
+
+            // HACK: Clear the textarea on send. Select all, delete.
+            current_client.textarea.select_all();
+            current_client
+                .textarea
+                .input(ratatui::termion::event::Event::Key(Key::Delete));
+            text
+        };
+        let name = self.entity().await.name().await;
+        let maybe_command = match Command::parse(&text) {
+            Ok(c) => c,
+            Err(e) => {
+                let mut clients = self.clients.write().await;
+                let Some(current_client) = clients.get_mut(&self.id) else {
+                    log::warn!(
+                        "failed to get handle on the current client with id: {}",
+                        self.id
+                    );
+                    return Ok(());
+                };
+                current_client.statusline = e.to_string();
+                return Ok(());
+            }
+        };
+
+        let Some(command) = maybe_command else {
+            let message = format!("[{name}]: {text}");
+            self.app.write().await.history.push(Message::Plain(message));
+            self.render().await;
+            return Ok(());
+        };
+        self.run_command(command).await?;
         Ok(())
     }
 }
@@ -415,6 +476,7 @@ impl Handler for AppServer {
                 channel,
                 handle,
                 terminal,
+                statusline: String::default(),
             };
 
             self.clients.write().await.insert(self.id, client);
@@ -474,47 +536,13 @@ impl Handler for AppServer {
             }
             // Press Return to send a message
             [13] => {
-                let text = {
-                    let mut clients = self.clients.write().await;
-                    let Some(current_client) = clients.get_mut(&self.id) else {
-                        log::warn!(
-                            "failed to get handle on the current client with id: {}",
-                            self.id
-                        );
-                        return Ok(());
-                    };
-                    let text = current_client.textarea.lines().to_vec().join("\n");
-
-                    // HACK: Clear the textarea on send. Select all, delete.
-                    current_client.textarea.select_all();
-                    current_client
-                        .textarea
-                        .input(ratatui::termion::event::Event::Key(
-                            ratatui::termion::event::Key::Delete,
-                        ));
-                    text
+                if let Err(error) = self.handle_message().await {
+                    log::error!(
+                        "failed to handle message or potential command sent by client {}: {:?}",
+                        self.id,
+                        error
+                    );
                 };
-                let name = self.entity().await.name().await;
-
-                let maybe_command = match Command::parse(&text) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        log::error!("{e:?}");
-                        return Ok(());
-                    }
-                };
-                let Some(command) = maybe_command else {
-                    let message = format!("[{name}]: {text}");
-                    self.app.write().await.history.push(Message::Plain(message));
-                    self.render().await;
-                    return Ok(());
-                };
-
-                if self.entity().await.role().await != authfile::Role::Admin {
-                    // TODO: write to statusline: you are not an admin
-                    return Ok(());
-                }
-                self.run_command(command).await?;
                 // re-render
                 self.render().await;
             }
@@ -674,7 +702,7 @@ impl FromStr for EntityLookup {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let lookup = match s.split_once(':') {
-            Some(("SHA256", digest)) if !digest.contains(':') => {
+            Some(("SHA256", digest)) if !digest.is_empty() && !digest.contains(':') => {
                 EntityLookup::Sha256(s.to_string())
             }
             None => EntityLookup::Name(s.to_string()),
