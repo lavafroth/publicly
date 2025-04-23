@@ -9,7 +9,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::termion::event::{Event, Key};
 use ratatui::text::Text;
-use ratatui::widgets::{Block, BorderType, List};
+use ratatui::widgets::{Block, BorderType, Clear, List};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use ringbuffer::{AllocRingBuffer, RingBuffer};
 use russh::keys::{PublicKey, ssh_key::public::KeyData, ssh_key::rand_core::OsRng};
@@ -103,6 +103,8 @@ pub enum Error {
     NotAnAdmin(String),
     #[error("failed to parse SSH key string to an entity")]
     EntityParsing(#[from] entity::Error),
+    #[error("users cannot ban themselves")]
+    NoBanSelf,
 }
 
 pub struct Client {
@@ -352,6 +354,47 @@ fingerprint: {}
 
                 self.app.write().await.history.push(Message::Plain(dossier));
             }
+            Command::Ban(entity_lookup) => {
+                let keychain = self.keychain.read().await;
+                let mut maybe_found_entity = None;
+                for entity in keychain.iter() {
+                    if entity_lookup.matches(entity).await {
+                        maybe_found_entity.replace(entity);
+                        break;
+                    }
+                }
+                let Some(entity) = maybe_found_entity else {
+                    return Ok(());
+                };
+
+                let key_data = entity.key_data();
+                if self.entity().await.key_data() == entity.key_data() {
+                    // prevent user from banning themselves
+                    return Err(Error::NoBanSelf);
+                }
+
+                let mut key_data_to_user = self.key_data_to_user.write().await;
+                let mut key_data_pool = self.key_data_pool.write().await;
+
+                key_data_to_user.remove(&key_data);
+                key_data_pool.remove(&key_data);
+
+                let mut key_data_to_id = self.key_data_to_id.write().await;
+                let Some(ids) = key_data_to_id.remove(&key_data) else {
+                    return Ok(());
+                };
+
+                let mut clients = self.clients.write().await;
+                for id in ids {
+                    let Some(client) = clients.get(&id) else {
+                        continue;
+                    };
+                    if let Err(()) = client.handle.close(client.channel).await {
+                        return Err(Error::ClientDisconnectFailed(id));
+                    }
+                    clients.remove(&id);
+                }
+            }
         }
         Ok(())
     }
@@ -520,7 +563,14 @@ impl Handler for AppServer {
                     key_data_to_id.remove(&stray_key_data);
 
                     id_to_user.remove(&self.id);
-                    self.clients.write().await.remove(&self.id);
+                    if let Some(mut leaving_client) = self.clients.write().await.remove(&self.id) {
+                        if let Err(e) = leaving_client
+                            .terminal
+                            .draw(|f| f.render_widget(Clear, f.area()))
+                        {
+                            log::error!("failed to clear the screen of leaving client: {e:?}");
+                        };
+                    };
                 }
                 return Err(russh::Error::Disconnect.into());
             }
@@ -687,6 +737,7 @@ pub enum Command {
     Rename { from: String, to: String },
     Commit,
     Info(lookup::EntityLookup),
+    Ban(lookup::EntityLookup),
 }
 
 impl Command {
@@ -697,17 +748,13 @@ impl Command {
 
         let split = text.split_once(char::is_whitespace);
         let is_admin = role == entity::Role::Admin;
+        if !is_admin && matches!(split, Some(("/add" | "/rename" | "/ban", _))) {
+            return Err(Error::NotAnAdmin(name));
+        }
+
         Ok(Some(match split {
-            Some(("/add", payload)) => {
-                if !is_admin {
-                    return Err(Error::NotAnAdmin(name));
-                }
-                Self::Add(payload.parse()?)
-            }
+            Some(("/add", payload)) => Self::Add(payload.parse()?),
             Some(("/rename", payload)) => {
-                if !is_admin {
-                    return Err(Error::NotAnAdmin(name));
-                }
                 let split_payload: Vec<&str> = payload.split_whitespace().collect();
                 match split_payload.as_slice() {
                     [from, to] => Self::Rename {
@@ -718,6 +765,7 @@ impl Command {
                 }
             }
             Some(("/info", payload)) => Self::Info(payload.parse()?),
+            Some(("/ban", payload)) => Self::Ban(payload.parse()?),
             _ => return Ok(None),
         }))
     }
