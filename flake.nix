@@ -5,17 +5,17 @@
 
   outputs =
     {
-      self,
       nixpkgs,
-      flake-utils,
+      ...
     }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        pkgs = nixpkgs.legacyPackages.${system};
-      in
-      {
-        packages.default = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+    let
+      forAllSystems =
+        f:
+        nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed (system: f nixpkgs.legacyPackages.${system});
+    in
+    {
+      packages = forAllSystems (pkgs: {
+        default = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
           pname = "publicly";
           version = "1.0.0";
 
@@ -24,14 +24,18 @@
             lockFile = ./Cargo.lock;
           };
         };
+      });
 
-        devShells.default = pkgs.mkShell rec {
+      devShells = forAllSystems (pkgs: {
+
+        default = pkgs.mkShell rec {
           packages = with pkgs; [
             stdenv.cc.cc.lib
           ];
 
           LD_LIBRARY_PATH = "${nixpkgs.lib.makeLibraryPath packages}";
         };
-      }
-    );
+
+      });
+    };
 }
