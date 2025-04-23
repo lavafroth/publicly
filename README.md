@@ -2,10 +2,37 @@
 
 Authenticate publicly, chat privately.
 
-*Publicly* aims to mirror a subset of IRC, replacing the "default permit" policy with "invite only".
+*Publicly* is a lean, *invite only* chat server over SSH connections.  
 
-New users can be added by modifying the authorization file `Authfile` either via the chat
-interface or by editing it externally.
+### Quickstart
+
+Install *publicly* either by downloading a release or building from source.
+
+```sh
+cargo install --git https://github.com/lavafroth/publicly
+```
+
+Generate a keypair for the administrator.
+
+```sh
+ssh-keygen -f op -C "op:admin" -t ed25519 -N ""
+mv op.pub Authfile
+```
+
+Deploy.
+
+```sh
+publicly
+```
+
+This binds to port 2222 on all interfaces. Members with the respective
+private keys can join like so:
+
+```sh
+ssh 0.0.0.0 -p 2222 -oStrictHostKeyChecking=No -i op
+```
+
+Here, the private key file is named `op`.
 
 ### Roadmap
 
@@ -26,7 +53,8 @@ interface or by editing it externally.
 
 The `Authfile` is the source of truth.
 
-Keys can be added via the chat interface but they won't persist over multiple runs of the server
+Keys can be added via the chat interface with the `/add` command
+but they won't persist over multiple runs of the server
 unless they are committed using the `/commit` command.
 
 Consider the keys in the example `Authfile`
@@ -47,21 +75,3 @@ anyone joining with the respective key. Further, `bob@work` can join only with n
 > [!NOTE]
 Usernames may only contain ASCII alphanumeric characters and the symbols `@-_.`.
 All other characters will be stripped.
-
-### Getting started
-
-Create a file called `Authfile` and add the SSH public keys of trusted members
-as described in the previous section.
-
-Inside the project directory run
-
-```sh
-cargo r
-```
-
-This binds to localhost on port 2222 over all interfaces. Members with the respective
-private keys will now be able to SSH as
-
-```sh
-ssh 0.0.0.0 -p 2222 -oStrictHostKeyChecking=No
-```
