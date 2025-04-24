@@ -49,30 +49,43 @@ enum Message {
         persona: ArcPersona,
     },
     Plain(String),
+    Dossier {
+        contents: String,
+        requested_by: usize,
+    },
 }
 
 impl Message {
-    pub async fn text_content(&self) -> String {
+    pub async fn text_content(&self) -> Text {
         match self {
             Message::Announce { action, persona } => match action {
                 Announcement::Joined => {
                     let persona = persona.read().await;
-                    format!(
-                        "{} has joined the chat with {} privileges",
-                        persona.name(),
-                        persona.role()
+                    Text::styled(
+                        format!(
+                            "{} has joined the chat with {} privileges",
+                            persona.name(),
+                            persona.role()
+                        ),
+                        Style::default().fg(Color::Green),
                     )
                 }
                 Announcement::Left => {
                     let persona = persona.read().await;
-                    format!(
-                        "{} with {} privileges has left the chat",
-                        persona.name(),
-                        persona.role()
+                    Text::styled(
+                        format!(
+                            "{} with {} privileges has left the chat",
+                            persona.name(),
+                            persona.role()
+                        ),
+                        Style::default().fg(Color::Green),
                     )
                 }
             },
-            Message::Plain(s) => s.to_string(),
+            Message::Dossier { contents, .. } => {
+                Text::styled(contents, Style::default().fg(Color::LightCyan))
+            }
+            Message::Plain(s) => Text::raw(s),
         }
     }
 }
@@ -218,17 +231,21 @@ impl AppServer {
         let history: Vec<Message> = self.app.read().await.history.to_vec();
 
         tokio::spawn(async move {
-            let mut paragraphs = Vec::with_capacity(history.len());
-            for message in history {
-                let style = Style::default().fg(Color::Green);
-                let text_content = match message {
-                    Message::Announce { .. } => Text::styled(message.text_content().await, style),
-                    Message::Plain(_) => Text::raw(message.text_content().await),
-                };
-                paragraphs.push(text_content);
-            }
-            let paragraphs = List::new(paragraphs);
-            for (_, client) in clients.write().await.iter_mut() {
+            for (id, client) in clients.write().await.iter_mut() {
+                // build the message history paragraphs for each client
+                let mut paragraphs = Vec::with_capacity(history.len());
+                for message in history.iter() {
+                    if let Message::Dossier { requested_by, .. } = message {
+                        if requested_by != id {
+                            // show a dossier only to the admin requesting it
+                            continue;
+                        }
+                    }
+                    let text_content = message.text_content().await;
+                    paragraphs.push(text_content);
+                }
+                let paragraphs = List::new(paragraphs);
+
                 let res = client.terminal.draw(|f| {
                     // clear the screen
                     let layout = ui::layout(f);
@@ -251,7 +268,7 @@ impl AppServer {
     async fn run_command(&self, command: Command) -> Result<(), Error> {
         match command {
             Command::Add(entity) => {
-                log::info!("attempting to add {:#?}", entity);
+                log::debug!("attempting to add {:#?}", entity);
                 let mut keychain = self.keychain.write().await;
                 let mut key_data_pool = self.key_data_pool.write().await;
                 let mut key_data_to_user = self.key_data_to_user.write().await;
@@ -352,7 +369,10 @@ fingerprint: {}
                     entity.fingerprint()
                 );
 
-                self.app.write().await.history.push(Message::Plain(dossier));
+                self.app.write().await.history.push(Message::Dossier {
+                    contents: dossier,
+                    requested_by: self.id,
+                });
             }
             Command::Ban(entity_lookup) => {
                 let keychain = self.keychain.read().await;
