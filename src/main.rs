@@ -163,13 +163,6 @@ impl AppServer {
         Ok(())
     }
 
-    async fn check_role_and_reload(&mut self) -> Result<(), Error> {
-        if self.entity().await.role().await != entity::Role::Admin {
-            return Err(Error::NotAnAdmin(self.entity().await.name().await));
-        }
-        self.reload().await
-    }
-
     async fn reload(&mut self) -> Result<(), Error> {
         let new_keychain = authfile::read(Path::new(&self.args.authfile)).await?;
 
@@ -265,7 +258,7 @@ impl AppServer {
         });
     }
 
-    async fn run_command(&self, command: Command) -> Result<(), Error> {
+    async fn run_command(&mut self, command: Command) -> Result<(), Error> {
         match command {
             Command::Add(entity) => {
                 log::debug!("attempting to add {:#?}", entity);
@@ -415,6 +408,7 @@ fingerprint: {}
                     clients.remove(&id);
                 }
             }
+            Command::Reload => self.reload().await?,
         }
         Ok(())
     }
@@ -629,10 +623,6 @@ impl Handler for AppServer {
                     };
 
                     match ratatui::termion::event::parse_event(first, &mut iterator) {
-                        // Press `Ctrl-r` to reload the authorization file
-                        Ok(Event::Key(Key::Ctrl('r'))) => {
-                            self.check_role_and_reload().await?;
-                        }
                         Ok(keycode) => {
                             let mut clients = self.clients.write().await;
                             let Some(client) = clients.get_mut(&self.id) else {
@@ -758,34 +748,33 @@ pub enum Command {
     Commit,
     Info(lookup::EntityLookup),
     Ban(lookup::EntityLookup),
+    Reload,
 }
 
 impl Command {
     fn parse(text: &str, role: entity::Role, name: String) -> Result<Option<Self>, Error> {
-        if text == "/commit" {
-            return Ok(Some(Self::Commit));
-        }
-
-        let split = text.split_once(char::is_whitespace);
+        let split: Vec<&str> = text.split(char::is_whitespace).collect();
         let is_admin = role == entity::Role::Admin;
-        if !is_admin && matches!(split, Some(("/add" | "/rename" | "/ban", _))) {
-            return Err(Error::NotAnAdmin(name));
-        }
 
-        Ok(Some(match split {
-            Some(("/add", payload)) => Self::Add(payload.parse()?),
-            Some(("/rename", payload)) => {
-                let split_payload: Vec<&str> = payload.split_whitespace().collect();
-                match split_payload.as_slice() {
-                    [from, to] => Self::Rename {
-                        to: to.to_string(),
-                        from: from.to_string(),
-                    },
-                    _ => return Err(Error::CommandParse(text.to_string())),
-                }
+        Ok(Some(match &split[..] {
+            ["/info", payload] => Self::Info(payload.parse()?),
+            ["/add" | "/rename" | "/ban" | "/commit" | "/reload", ..] if !is_admin => {
+                return Err(Error::NotAnAdmin(name));
             }
-            Some(("/info", payload)) => Self::Info(payload.parse()?),
-            Some(("/ban", payload)) => Self::Ban(payload.parse()?),
+            ["/add", payload] => Self::Add(payload.parse()?),
+            ["/ban", payload] => Self::Ban(payload.parse()?),
+            ["/commit"] => Self::Commit,
+            ["/reload"] => Self::Reload,
+            ["/rename", from, to] => Self::Rename {
+                to: to.to_string(),
+                from: from.to_string(),
+            },
+            [
+                "/info" | "/add" | "/rename" | "/ban" | "/commit" | "/reload",
+                ..,
+            ] => {
+                return Err(Error::CommandParse(text.to_string()));
+            }
             _ => return Ok(None),
         }))
     }

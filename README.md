@@ -37,7 +37,6 @@ Here, the private key file is named `op`.
 ### Roadmap
 
 - [x] SSH authentication and authorization
-- [x] Ability for admins to reload Authfile with `Ctrl` `r`
 - [x] Emacs-like shortcuts for textarea
 - [x] multiline support with `Alt` `Return`
 - [x] Adjustable parameters:
@@ -45,6 +44,7 @@ Here, the private key file is named `op`.
   - [x] Authfile path
   - [x] Listening port number
 - [x] `/add` command to add new keys
+- [x] `/reload` command to reload the Authfile
 - [x] `/rename` command
 - [x] `/commit` command to commit in-memory changes to Authfile
 - [ ] `#mention` tags
