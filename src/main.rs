@@ -237,7 +237,9 @@ impl AppServer {
                     let text_content = message.text_content().await;
                     paragraphs.push(text_content);
                 }
-                let paragraphs = List::new(paragraphs);
+                paragraphs.reverse();
+                let paragraphs =
+                    List::new(paragraphs).direction(ratatui::widgets::ListDirection::BottomToTop);
 
                 let res = client.terminal.draw(|f| {
                     // clear the screen
