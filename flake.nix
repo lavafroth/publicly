@@ -1,6 +1,5 @@
 {
   description = "devshell for github:lavafroth/publicly";
-
   inputs.flake-utils.url = "github:numtide/flake-utils";
 
   outputs =
@@ -20,9 +19,7 @@
           version = "1.0.0";
 
           src = ./.;
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-          };
+          cargoLock.lockFile = ./Cargo.lock;
         };
       });
 
