@@ -6,9 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use ratatui::backend::TermionBackend;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
 use ratatui::termion::event::{Event, Key};
-use ratatui::text::Text;
 use ratatui::widgets::{Block, BorderType, Clear, List};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use ringbuffer::{AllocRingBuffer, RingBuffer};
@@ -20,10 +18,15 @@ use tui_textarea::TextArea;
 
 mod authfile;
 mod entity;
+mod error;
 mod lookup;
+mod message;
 mod terminal_handle;
 mod ui;
-use entity::{ArcPersona, Entity};
+
+use entity::Entity;
+use error::Error;
+use message::Message;
 use terminal_handle::TerminalHandle;
 
 type SshTerminal = Terminal<TermionBackend<TerminalHandle>>;
@@ -36,88 +39,10 @@ fn new_atomic<T>(object: T) -> Atomic<T> {
 
 type Atomic<T> = Arc<RwLock<T>>;
 
-#[derive(Clone)]
-enum Announcement {
-    Joined,
-    Left,
-}
-
-#[derive(Clone)]
-enum Message {
-    Announce {
-        action: Announcement,
-        persona: ArcPersona,
-    },
-    Plain(String),
-    Dossier {
-        contents: String,
-        requested_by: usize,
-    },
-}
-
-impl Message {
-    pub async fn text_content(&self) -> Text {
-        match self {
-            Message::Announce { action, persona } => match action {
-                Announcement::Joined => {
-                    let persona = persona.read().await;
-                    Text::styled(
-                        format!(
-                            "{} has joined the chat with {} privileges",
-                            persona.name(),
-                            persona.role()
-                        ),
-                        Style::default().fg(Color::Green),
-                    )
-                }
-                Announcement::Left => {
-                    let persona = persona.read().await;
-                    Text::styled(
-                        format!(
-                            "{} with {} privileges has left the chat",
-                            persona.name(),
-                            persona.role()
-                        ),
-                        Style::default().fg(Color::Green),
-                    )
-                }
-            },
-            Message::Dossier { contents, .. } => {
-                Text::styled(contents, Style::default().fg(Color::LightCyan))
-            }
-            Message::Plain(s) => Text::raw(s),
-        }
-    }
-}
-
 /// App contains data strictly related to the chat.
 /// It is not responsible for authorization.
 struct App {
     pub history: AllocRingBuffer<Message>,
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error("failed to disconnect client with id {0}")]
-    ClientDisconnectFailed(usize),
-    #[error("russh error")]
-    Russh(#[from] russh::Error),
-    #[error("failed to read authorization file")]
-    Authfile(#[from] authfile::Error),
-    #[error("failed to resize frame as requested by client {id}")]
-    FrameResize { source: std::io::Error, id: usize },
-    #[error("failed to parse command {0:#?}")]
-    CommandParse(String),
-    #[error("unable to spawn a terminal for client {id}")]
-    TerminalSessionSpawn { source: std::io::Error, id: usize },
-    #[error("failed to parse entity lookup: {0}")]
-    EntityLookup(String),
-    #[error("user {0:?} is not an admin")]
-    NotAnAdmin(String),
-    #[error("failed to parse SSH key string to an entity")]
-    EntityParsing(#[from] entity::Error),
-    #[error("users cannot ban themselves")]
-    NoBanSelf,
 }
 
 pub struct Client {
@@ -213,10 +138,10 @@ impl AppServer {
         self.id_to_user.read().await[&self.id].clone()
     }
 
-    async fn announce(&mut self, action: Announcement) {
+    async fn announce(&mut self, action: message::Announcement) {
         let persona = self.entity().await.persona();
         let message = Message::Announce { action, persona };
-        self.app.write().await.history.push(message);
+        self.app.write().await.history.enqueue(message);
     }
 
     async fn render(&self) {
@@ -263,7 +188,7 @@ impl AppServer {
     async fn run_command(&mut self, command: Command) -> Result<(), Error> {
         match command {
             Command::Add(entity) => {
-                log::debug!("attempting to add {:#?}", entity);
+                log::debug!("attempting to add {entity:#?}");
                 let mut keychain = self.keychain.write().await;
                 let mut key_data_pool = self.key_data_pool.write().await;
                 let mut key_data_to_user = self.key_data_to_user.write().await;
@@ -364,7 +289,7 @@ fingerprint: {}
                     entity.fingerprint()
                 );
 
-                self.app.write().await.history.push(Message::Dossier {
+                self.app.write().await.history.enqueue(Message::Dossier {
                     contents: dossier,
                     requested_by: self.id,
                 });
@@ -454,7 +379,11 @@ fingerprint: {}
 
         let Some(command) = maybe_command else {
             let message = format!("[{name}]: {text}");
-            self.app.write().await.history.push(Message::Plain(message));
+            self.app
+                .write()
+                .await
+                .history
+                .enqueue(Message::Plain(message));
             self.render().await;
             return Ok(());
         };
@@ -482,7 +411,7 @@ impl Server for AppServer {
         s
     }
     fn handle_session_error(&mut self, error: <Self::Handler as russh::server::Handler>::Error) {
-        log::error!("session error: {:#?}", error);
+        log::error!("session error: {error:#?}");
     }
 }
 
@@ -530,7 +459,7 @@ impl Handler for AppServer {
 
             self.clients.write().await.insert(self.id, client);
         }
-        self.announce(Announcement::Joined).await;
+        self.announce(message::Announcement::Joined).await;
         Ok(true)
     }
 
@@ -562,7 +491,7 @@ impl Handler for AppServer {
         match data {
             // Sending Ctrl+C ends the session and disconnects the client
             [3] => {
-                self.announce(Announcement::Left).await;
+                self.announce(message::Announcement::Left).await;
                 self.render().await;
                 {
                     let mut key_data_to_id = self.key_data_to_id.write().await;
@@ -637,7 +566,7 @@ impl Handler for AppServer {
                             client.textarea.input(keycode);
                         }
                         Err(e) => {
-                            log::warn!("failed to parse keyboard input data: {:?}: {e}", data);
+                            log::warn!("failed to parse keyboard input data: {data:?}: {e}");
                         }
                     }
                 }

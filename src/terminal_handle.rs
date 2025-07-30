@@ -13,7 +13,7 @@ impl TerminalHandle {
         tokio::spawn(async move {
             while let Some(data) = receiver.recv().await {
                 if let Err(error) = handle.data(channel_id, data.into()).await {
-                    log::error!("Failed to send data: {:?}", error);
+                    log::error!("Failed to send data: {error:?}");
                 }
             }
         });
