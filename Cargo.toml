@@ -12,5 +12,5 @@ ratatui = "0.29.0"
 ringbuffer = "0.15.0"
 russh = "0.51.1"
 thiserror = "2.0.12"
-tokio = "1.44.1"
+tokio = "1.47.0"
 tui-textarea = { version = "0.7.0", features = ["termion"] }
