@@ -11,6 +11,6 @@ log = "0.4.27"
 ratatui = "0.29.0"
 ringbuffer = "0.16.0"
 russh = "0.54.4"
-thiserror = "2.0.16"
+thiserror = "2.0.17"
 tokio = "1.47.1"
 tui-textarea = { version = "0.7.0", features = ["termion"] }
