@@ -35,3 +35,24 @@ pub enum Error {
     #[error("failed to parse entity: {0}")]
     PublicKeyParsing(#[from] crate::entity::Error),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_read_nonexistent_file() {
+        let nonexistent = Path::new("tests/fixtures/nonexistent.txt");
+        match read(nonexistent).await {
+            Err(Error::FileNotReadable(_)) => {}
+            _ => panic!("reading nonexistent authfile succeded: should have failed"),
+        };
+    }
+
+    #[tokio::test]
+    async fn test_valid_authfile() {
+        read(Path::new("tests/fixtures/valid_authfile"))
+            .await
+            .expect("failed to read valid authfile fixture");
+    }
+}
