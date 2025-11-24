@@ -153,11 +153,11 @@ impl AppServer {
                 // build the message history paragraphs for each client
                 let mut paragraphs = Vec::with_capacity(history.len());
                 for message in history.iter() {
-                    if let Message::Dossier { requested_by, .. } = message {
-                        if requested_by != id {
-                            // show a dossier only to the admin requesting it
-                            continue;
-                        }
+                    if let Message::Dossier { requested_by, .. } = message
+                        && requested_by != id
+                    {
+                        // show a dossier only to the admin requesting it
+                        continue;
                     }
                     let text_content = message.text_content().await;
                     paragraphs.push(text_content);
@@ -508,13 +508,12 @@ impl Handler for AppServer {
                     key_data_to_id.remove(&stray_key_data);
 
                     id_to_user.remove(&self.id);
-                    if let Some(mut leaving_client) = self.clients.write().await.remove(&self.id) {
-                        if let Err(e) = leaving_client
+                    if let Some(mut leaving_client) = self.clients.write().await.remove(&self.id)
+                        && let Err(e) = leaving_client
                             .terminal
                             .draw(|f| f.render_widget(Clear, f.area()))
-                        {
-                            log::error!("failed to clear the screen of leaving client: {e:?}");
-                        };
+                    {
+                        log::error!("failed to clear the screen of leaving client: {e:?}");
                     };
                 }
                 return Err(russh::Error::Disconnect.into());
