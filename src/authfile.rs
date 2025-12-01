@@ -55,4 +55,22 @@ mod tests {
             .await
             .expect("failed to read valid authfile fixture");
     }
+
+    #[tokio::test]
+    async fn test_authfile_multiple_entries() {
+        let authfile = read(Path::new("tests/fixtures/multiple_entries_authfile"))
+            .await
+            .expect("failed to read authfile with multiple entries");
+
+        assert_eq!(authfile.entities.len(), 2);
+
+        let fingerprints = [
+            "SHA256:Ps6A7BicnJXgw9YM1kkN3hmDiuRG5KTD03IQ7czGalY",
+            "SHA256:Fbq5FVTRTm/FKKKTQcQXetbt6FKwTmQUBKjCIsUWZYA",
+        ];
+
+        for (entity, fingerprint) in authfile.entities.iter().zip(fingerprints) {
+            assert_eq!(fingerprint, entity.fingerprint())
+        }
+    }
 }
