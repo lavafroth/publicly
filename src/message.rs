@@ -23,7 +23,7 @@ pub(crate) enum Message {
 }
 
 impl Message {
-    pub async fn text_content(&self) -> Text {
+    pub async fn text_content(&self) -> Text<'_> {
         match self {
             Message::Announce { action, persona } => {
                 let persona = persona.read().await;
