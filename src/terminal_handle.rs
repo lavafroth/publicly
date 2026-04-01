@@ -12,7 +12,7 @@ impl TerminalHandle {
         let (sender, mut receiver) = unbounded_channel::<Vec<u8>>();
         tokio::spawn(async move {
             while let Some(data) = receiver.recv().await {
-                if let Err(error) = handle.data(channel_id, data.into()).await {
+                if let Err(error) = handle.data(channel_id, data).await {
                     log::error!("Failed to send data: {error:?}");
                 }
             }
